@@ -1,0 +1,9 @@
+# Local configuration and all runtime data (database, sessions, rate-limit files) stay out of git.
+/config.php
+/data/
+!/data/.htaccess
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+.DS_Store
+Thumbs.db
