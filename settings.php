@@ -38,10 +38,33 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
     if ($do === 'del_user') {
         $id = (int) ($_POST['id'] ?? 0);
+        $t = user_by_id($id);
+        // Who takes over their contacts, companies, deals and tasks: another member, or 0 to leave them unassigned.
+        $inherit = (int) ($_POST['inherit'] ?? 0);
         if ($id === (int) $u['id']) flash_set('You cannot remove yourself.', 'err');
-        elseif (($t = user_by_id($id)) && $t['role'] === 'admin' && (int) db()->query("SELECT COUNT(*) FROM users WHERE role='admin' AND status='active'")->fetchColumn() <= 1) flash_set('There must be at least one admin.', 'err');
-        else { go_del('users', $id); flash_set('Team member removed.'); }
+        elseif (!$t) flash_set('That team member has already been removed.', 'err');
+        elseif ($t['role'] === 'admin' && (int) db()->query("SELECT COUNT(*) FROM users WHERE role='admin' AND status='active'")->fetchColumn() <= 1) flash_set('There must be at least one admin.', 'err');
+        elseif ($inherit === $id || ($inherit && !user_by_id($inherit))) { flash_set('Choose someone else on the team to take over their records.', 'err'); redirect('settings.php?remove=' . $id); }
+        else {
+            $moved = user_remove($id, $inherit);
+            $n = $moved['contacts'] + $moved['companies'] + $moved['deals'] + $moved['tasks'];
+            notify_assigned('inherit', $inherit, $u, [], ['name' => user_label($t), 'counts' => $moved]);
+            $what = $n . ' record' . ($n === 1 ? '' : 's');
+            flash_set('Team member removed.' . ($n === 0 ? '' : ($inherit ? ' Their ' . $what . ' now belong' . ($n === 1 ? 's' : '') . ' to ' . user_label(user_by_id($inherit)) . '.' : ' Their ' . $what . ($n === 1 ? ' is' : ' are') . ' now unassigned.')));
+        }
         redirect('settings.php#team');
+    }
+    if ($do === 'routing') {
+        $mode = in_array(($_POST['mode'] ?? ''), ['fixed', 'round_robin'], true) ? (string) $_POST['mode'] : 'none';
+        $one = valid_user_id((int) ($_POST['user_id'] ?? 0));
+        $many = [];
+        foreach ((array) ($_POST['user_ids'] ?? []) as $v) if (is_scalar($v) && valid_user_id((int) $v)) $many[(int) $v] = true;
+        $many = array_keys($many);
+        if ($mode === 'fixed' && !$one) { flash_set('Choose the person who gets every new lead.', 'err'); redirect('settings.php#routing'); }
+        if ($mode === 'round_robin' && !$many) { flash_set('Tick at least one person to share new leads between.', 'err'); redirect('settings.php#routing'); }
+        lead_routing_set($mode, $one, $many);
+        setting_set('assign_emails', isset($_POST['assign_emails']) ? '1' : '0');
+        flash_set('Lead routing saved.'); redirect('settings.php#routing');
     }
     if ($do === 'email_save') {
         $id = (int) ($_POST['id'] ?? 0);
@@ -68,11 +91,46 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if ($do === 'api_reset') { api_token_reset(); flash_set('A new API token was generated.'); redirect('settings.php#api'); }
 }
 
+/* ---------- removing a team member: confirm, and choose who takes over what they own ---------- */
+if (isset($_GET['remove']) && is_admin($u)) {
+    $t = user_by_id((int) $_GET['remove']);
+    if (!$t || (int) $t['id'] === (int) $u['id']) redirect('settings.php#team');
+    $own = user_owned_counts((int) $t['id']);
+    $parts = [];
+    foreach (['contacts' => 'contact', 'companies' => 'company', 'deals' => 'deal', 'tasks' => 'task'] as $k => $one) {
+        if ($own[$k] > 0) $parts[] = '<b>' . $own[$k] . ' ' . ($own[$k] === 1 ? $one : ($one === 'company' ? 'companies' : $one . 's')) . '</b>' . ($k === 'tasks' && $own['open_tasks'] !== $own['tasks'] ? ' (' . $own['open_tasks'] . ' still open)' : '');
+    }
+    $owns = count($parts) > 1 ? implode(', ', array_slice($parts, 0, -1)) . ' and ' . end($parts) : ($parts[0] ?? '');
+    $rt = lead_routing();
+    $routed = ($rt['mode'] === 'fixed' && $rt['user_id'] === (int) $t['id']) || ($rt['mode'] === 'round_robin' && in_array((int) $t['id'], $rt['user_ids'], true));
+    head('Remove team member', 'settings', $u);
+    ?>
+    <div class="pagehead"><a href="<?= h(url('settings.php#team')) ?>" class="muted">&larr; Settings</a></div>
+    <div class="card" style="max-width:640px"><h2>Remove <?= h(user_label($t)) ?> from the team?</h2>
+      <p class="small muted"><?= h($t['email']) ?> &middot; <?= h($t['role']) ?>. They will no longer be able to sign in.</p>
+      <form method="post" action="<?= h(url('settings.php')) ?>" style="margin-top:12px"><?= csrf_field() ?><input type="hidden" name="do" value="del_user"><input type="hidden" name="id" value="<?= (int) $t['id'] ?>">
+        <?php if ($parts): ?>
+          <p>They own <?= $owns ?>.</p>
+          <label for="inherit">Who takes these over?</label>
+          <select name="inherit" id="inherit" required><option value="" selected disabled>- choose -</option>
+            <?php foreach (users_all() as $m): if ((int) $m['id'] === (int) $t['id']) continue; ?><option value="<?= (int) $m['id'] ?>"><?= h(user_label($m)) ?><?= (int) $m['id'] === (int) $u['id'] ? ' (you)' : '' ?></option><?php endforeach; ?>
+            <option value="0">Nobody - leave them unassigned</option></select>
+        <?php else: ?>
+          <p>They do not own any contacts, companies, deals or tasks, so there is nothing to hand over.</p><input type="hidden" name="inherit" value="0">
+        <?php endif; ?>
+        <?php if ($routed): ?><p class="small muted" style="margin-top:10px">New leads are routed to them at the moment. <?= $rt['mode'] === 'fixed' ? 'After this, new leads go to whoever takes over, or stay unassigned if nobody does.' : 'After this, they are taken out of the round-robin.' ?></p><?php endif; ?>
+        <div style="margin-top:16px;display:flex;gap:8px;flex-wrap:wrap"><button class="btn danger">Remove <?= h(user_label($t)) ?></button><a class="btn ghost" href="<?= h(url('settings.php#team')) ?>">Cancel</a></div>
+      </form>
+    </div>
+    <?php foot(); exit;
+}
+
 $o = org(); $accounts = email_accounts(); $team = users_all();
 $tz = $o['timezone'] ?? date_default_timezone_get();
 $cronLast = cron_last(); $cronWhy = cron_links_problem();
 // The address to suggest for config.php 'base_url': the one this page was opened at, unless that is local too.
 $suggestBase = url_is_local(base_url()) ? 'https://crm.example.com' : base_url();
+$rt = lead_routing(); $nextUp = $rt['mode'] === 'round_robin' ? user_by_id(lead_route_peek()) : null;
 head('Settings', 'settings', $u);
 ?>
 <div class="pagehead"><h1>Settings</h1></div>
@@ -131,7 +189,7 @@ head('Settings', 'settings', $u);
 <div class="card" id="team"><h2>Team</h2>
   <table class="tbl" style="margin-bottom:12px"><thead><tr><th>Name</th><th>Email</th><th>Role</th><th></th></tr></thead><tbody>
     <?php foreach ($team as $m): ?><tr><td><?= h($m['name'] ?: '-') ?><?= (int) $m['id'] === (int) $u['id'] ? ' <span class="tag">you</span>' : '' ?></td><td class="muted"><?= h($m['email']) ?></td><td><span class="tag <?= $m['role'] === 'admin' ? 'ok' : '' ?>"><?= h($m['role']) ?></span></td>
-      <td style="text-align:right"><?php if ((int) $m['id'] !== (int) $u['id']): ?><form method="post" onsubmit="return confirm('Remove this team member?')"><?= csrf_field() ?><input type="hidden" name="do" value="del_user"><input type="hidden" name="id" value="<?= (int) $m['id'] ?>"><button class="btn danger sm">Remove</button></form><?php endif; ?></td></tr>
+      <td style="text-align:right"><?php if ((int) $m['id'] !== (int) $u['id']): ?><a class="btn danger sm" href="<?= h(url('settings.php?remove=' . (int) $m['id'])) ?>" title="Remove them and choose who takes over their records">Remove</a><?php endif; ?></td></tr>
     <?php endforeach; ?>
   </tbody></table>
   <details><summary class="btn ghost sm" style="display:inline-block">+ Add team member</summary>
@@ -139,6 +197,23 @@ head('Settings', 'settings', $u);
     <div class="row"><div><label>Name</label><input name="uname"></div><div><label>Email</label><input type="email" name="email" required></div></div>
     <div class="row"><div><label>Temporary password</label><input name="upass" minlength="8" required></div><div class="grow0" style="flex:0 0 140px"><label>Role</label><select name="role"><option value="member">Member</option><option value="admin">Admin</option></select></div></div>
     <button class="btn sm" style="margin-top:12px">Add member</button></form></details>
+</div>
+
+<div class="card" id="routing"><h2>Lead routing</h2>
+  <p class="small muted">Who gets a new contact that arrives through a form, the API or a CSV import. A contact someone adds by hand is theirs, unless they choose another owner.</p>
+  <form method="post" style="max-width:640px;margin-top:4px"><?= csrf_field() ?><input type="hidden" name="do" value="routing">
+    <label style="display:flex;align-items:center;gap:8px;font-size:.9rem;color:var(--text)"><input type="radio" name="mode" value="none" <?= $rt['mode'] === 'none' ? 'checked' : '' ?>> Leave new leads unassigned</label>
+    <label style="display:flex;align-items:center;gap:8px;font-size:.9rem;color:var(--text)"><input type="radio" name="mode" value="fixed" <?= $rt['mode'] === 'fixed' ? 'checked' : '' ?>> Give every new lead to one person</label>
+    <div style="margin:0 0 4px 26px;max-width:320px"><select name="user_id" aria-label="The person who gets every new lead" onchange="if(this.value!=='0')this.form.elements['mode'].value='fixed'"><?= user_options($rt['user_id'], '- choose -') ?></select></div>
+    <label style="display:flex;align-items:center;gap:8px;font-size:.9rem;color:var(--text)"><input type="radio" name="mode" value="round_robin" <?= $rt['mode'] === 'round_robin' ? 'checked' : '' ?>> Share new leads out in turn (round-robin) between</label>
+    <div style="margin:0 0 4px 26px;display:flex;gap:6px 18px;flex-wrap:wrap">
+      <?php foreach ($team as $m): ?><label style="display:flex;align-items:center;gap:6px;margin:4px 0;font-size:.88rem;color:var(--text)"><input type="checkbox" name="user_ids[]" value="<?= (int) $m['id'] ?>" <?= in_array((int) $m['id'], $rt['user_ids'], true) ? 'checked' : '' ?> onchange="if(this.checked)this.form.elements['mode'].value='round_robin'"> <?= h(user_label($m)) ?></label><?php endforeach; ?>
+    </div>
+    <?php if ($nextUp): ?><p class="small muted" style="margin-left:26px">Next in line: <b><?= h(user_label($nextUp)) ?></b></p><?php endif; ?>
+    <label style="display:flex;align-items:center;gap:8px;font-size:.9rem;color:var(--text);margin-top:16px;padding-top:14px;border-top:1px solid var(--line)"><input type="checkbox" name="assign_emails" <?= assign_emails_on() ? 'checked' : '' ?>> Email people when a lead, contact, company, deal or task is assigned to them</label>
+    <p class="small muted" style="margin-left:26px">Sent through your default email account<?= email_ready() ? '' : '. Nothing is sent until one is connected above' ?>.</p>
+    <button class="btn sm" style="margin-top:12px">Save</button>
+  </form>
 </div>
 
 <div class="card" id="ai"><h2>&#10024; AI (bring your own key)</h2>
