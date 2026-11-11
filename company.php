@@ -110,7 +110,7 @@ head($co['name'], 'companies', $u);
     <?php else: ?><table class="tbl"><?php foreach ($deals as $d): $stages = jdec($d['stages']); ?>
       <tr><td><a href="<?= h(url('pipelines.php?id=' . (int) $d['pipeline_id'] . '&deal=' . (int) $d['id'])) ?>"><b><?= h($d['name'] ?: 'Deal') ?></b></a>
             <div class="muted small"><?= h($d['pname'] ?? '') ?><?php if ($d['status'] === 'open' && isset($stages[(int) $d['stage']])): ?> &middot; <?= h($stages[(int) $d['stage']]) ?><?php endif; ?></div></td>
-          <td><?php if ($d['status'] === 'won'): ?><span class="tag ok">won</span><?php elseif ($d['status'] === 'lost'): ?><span class="tag bad">lost</span><?php elseif ($d['close_date'] !== ''): ?><span class="tag <?= $d['close_date'] < date('Y-m-d') ? 'bad' : '' ?>"><?= h($d['close_date']) ?></span><?php endif; ?></td>
+          <td><?php if ($d['status'] === 'won'): ?><span class="tag ok">won</span><?php elseif ($d['status'] === 'lost'): ?><span class="tag bad">lost</span><?php elseif ($d['close_date'] !== ''): ?><span class="tag <?= $d['close_date'] < date('Y-m-d') ? 'bad' : '' ?>" title="Expected close"><?= h(date('j M Y', strtotime($d['close_date']))) ?></span><?php endif; ?></td>
           <td style="text-align:right"><b><?= money((int) $d['value_cents']) ?></b></td></tr>
     <?php endforeach; ?></table><?php endif; ?>
   </div>

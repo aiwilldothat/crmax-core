@@ -64,6 +64,15 @@ function bar(string $label, int $val, int $max, string $sub = ''): string {
         . '<div style="background:var(--surface2);border-radius:6px;height:10px;overflow:hidden"><div style="height:100%;width:' . $pct . '%;background:linear-gradient(110deg,var(--brand),var(--brand2))"></div></div></div>';
 }
 
+/** One forecast row: the month, its weighted amount, a bar, then how many deals it holds and their full value. */
+function fbar(array $b, int $max): string {
+    $pct = $max > 0 ? round($b['w'] / $max * 100) : 0;
+    $meta = $b['n'] === 0 ? 'No deals' : $b['n'] . ' deal' . ($b['n'] === 1 ? '' : 's') . ' worth ' . money($b['raw'], '');
+    return '<div style="margin-bottom:12px"><div style="display:flex;justify-content:space-between;gap:10px;font-size:.86rem;margin-bottom:3px"><span>' . h($b['label']) . '</span><b>' . money($b['w'], '') . '</b></div>'
+        . '<div style="background:var(--surface2);border-radius:6px;height:10px;overflow:hidden"><div style="height:100%;width:' . $pct . '%;background:linear-gradient(110deg,var(--brand),var(--brand2))"></div></div>'
+        . '<div class="muted small" style="margin-top:3px">' . h($meta) . '</div></div>';
+}
+
 head('Reports', 'reports', $u);
 ?>
 <div class="pagehead"><h1>Reports</h1></div>
@@ -74,9 +83,10 @@ head('Reports', 'reports', $u);
   <div class="kpi"><div class="n"><?= money((int) $wonMonth['v']) ?></div><div class="l">Won this month</div></div>
 </div>
 <div class="grid2">
-  <div class="card"><h2>Forecast &middot; weighted pipeline by expected close</h2>
+  <div class="card"><h2 style="margin-bottom:2px">Forecast</h2>
+    <p class="muted small" style="margin-bottom:14px">Open deals weighted by win probability, by the month they are expected to close.</p>
     <?php if ($fcRaw === 0 && !array_sum(array_map(fn($b) => $b['n'], $fc))): ?><p class="muted small">No open deals yet. Add deals with an expected close date to see a forecast.</p>
-    <?php else: foreach ($fc as $b) echo bar($b['label'], $b['w'], $fcMax, $b['n'] . ' deal' . ($b['n'] === 1 ? '' : 's') . ', ' . money($b['raw']) . ', weighted ' . money($b['w'])); ?>
+    <?php else: foreach ($fc as $b) echo fbar($b, $fcMax); ?>
       <p class="small muted" style="margin-top:10px">Weighted total <b style="color:var(--text)"><?= money($fcWeighted) ?></b> of <?= money($fcRaw) ?> open. Each deal counts for its value times its win probability (its own, or its stage's default).</p>
     <?php endif; ?>
   </div>

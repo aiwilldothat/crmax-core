@@ -155,7 +155,7 @@ head('Pipeline', 'pipelines', $u);
   <div class="kcol" data-stage="<?= $i ?>" style="flex:0 0 260px;background:var(--surface2);border:1px solid var(--line);border-radius:14px;padding:10px;min-height:120px"
        ondragover="event.preventDefault();this.style.outline='2px dashed var(--brand)'" ondragleave="this.style.outline='none'" ondrop="drop(event,<?= $i ?>)">
     <div style="display:flex;justify-content:space-between;font-weight:700;font-size:.85rem"><span><?= h($s) ?> <span class="muted">(<?= count($byStage[$i]) ?>)</span></span><span class="muted small" title="Default win probability for this stage"><?= (int) $probs[$i] ?>%</span></div>
-    <div class="muted small" style="margin-bottom:8px"><?= money($sum) ?> &middot; weighted <?= money($wsum) ?></div>
+    <div class="muted small" style="margin-bottom:8px"><?= money($sum, '') ?> &middot; weighted <?= money($wsum, '') ?></div>
     <?php foreach ($byStage[$i] as $d):
         $overdue = $d['close_date'] !== '' && $d['close_date'] < $today;
         $who = trim(($d['company_name'] ?? '') !== '' ? (string) $d['company_name'] : '');

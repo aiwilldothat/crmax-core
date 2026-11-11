@@ -75,7 +75,7 @@ head(contact_name($c), 'contacts', $u);
     <?php if (!$deals): ?><p class="muted small">No deals. <a href="<?= h(url('pipelines.php')) ?>">Create one</a>.</p>
     <?php else: foreach ($deals as $d): $stages = jdec($d['stages']); ?>
       <div style="display:flex;justify-content:space-between;gap:10px;padding:6px 0;border-bottom:1px solid var(--line)"><span><a href="<?= h(url('pipelines.php?id=' . (int) $d['pipeline_id'] . '&deal=' . (int) $d['id'])) ?>"><?= h($d['name'] ?: 'Deal') ?></a>
-        <?php if ($d['status'] === 'won'): ?><span class="tag ok">won</span><?php elseif ($d['status'] === 'lost'): ?><span class="tag bad">lost</span><?php else: ?><span class="muted small"><?= h($stages[(int) $d['stage']] ?? '') ?><?= $d['close_date'] !== '' ? ' &middot; closes ' . h($d['close_date']) : '' ?></span><?php endif; ?></span><b><?= money((int) $d['value_cents']) ?></b></div>
+        <?php if ($d['status'] === 'won'): ?><span class="tag ok">won</span><?php elseif ($d['status'] === 'lost'): ?><span class="tag bad">lost</span><?php else: ?><span class="muted small"><?= h($stages[(int) $d['stage']] ?? '') ?><?= $d['close_date'] !== '' ? ' &middot; closes ' . h(date('j M Y', strtotime($d['close_date']))) : '' ?></span><?php endif; ?></span><b><?= money((int) $d['value_cents']) ?></b></div>
     <?php endforeach; endif; ?>
   </div>
  </div>
