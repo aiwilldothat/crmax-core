@@ -70,7 +70,7 @@ head('Tasks', 'tasks', $u);
       <td><span<?= $open ? '' : ' style="text-decoration:line-through;color:var(--muted)"' ?>><?= h($t['title']) ?></span><?php if ($from !== ''): ?> <span class="muted small">&middot; from <?= h($from) ?></span><?php endif; ?></td>
       <td><?php if ($t['contact_id'] && ($t['first_name'] || $t['email'])): ?><a href="<?= h(url('contact.php?id=' . (int) $t['contact_id'])) ?>" class="muted small"><?= h(contact_name($t)) ?></a><?php endif; ?></td>
       <td style="width:40px;text-align:center"><?= $open ? who_button((int) $t['assigned_to'], $team, ['do' => 'assign', 'id' => (int) $t['id'], 'f' => $f], 'assigned_to') : who_chip((int) $t['assigned_to'], $team, 'Assigned to') ?></td>
-      <td style="text-align:right"><?php if ($t['due_date']): ?><span class="tag <?= $overdue ? 'bad' : '' ?>"><?= h($t['due_date']) ?></span><?php endif; ?></td>
+      <td style="text-align:right;white-space:nowrap"><?php if ($t['due_date']): ?><span class="tag <?= $overdue ? 'bad' : '' ?>"><?= h($t['due_date']) ?></span><?php endif; ?></td>
       <td style="width:30px"><form method="post" onsubmit="return confirm('Delete task?')"><?= csrf_field() ?><input type="hidden" name="do" value="del"><input type="hidden" name="id" value="<?= (int) $t['id'] ?>"><button class="btn danger sm" style="padding:3px 8px">&times;</button></form></td>
     </tr>
     <?php endforeach; ?>

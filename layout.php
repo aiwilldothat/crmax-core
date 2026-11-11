@@ -98,7 +98,7 @@ function base_css(): string {
  .who{display:inline-flex;align-items:center;justify-content:center;min-width:24px;height:24px;padding:0 6px;border-radius:999px;background:var(--surface2);border:1px solid var(--line);font-family:inherit;font-size:.66rem;font-weight:700;line-height:1;color:var(--muted);vertical-align:middle;white-space:nowrap}
  button.who{cursor:pointer}button.who:hover{border-color:var(--brand);color:#0a7a58}
  .who.none{border-style:dashed;background:#fff;font-weight:400}
- .bulkbar{display:none;gap:8px;flex-wrap:wrap;align-items:center;padding:10px 12px;margin-bottom:12px;background:var(--surface2);border:1px solid var(--line);border-radius:12px;font-size:.86rem}
+ .bulkbar{display:none;gap:8px;flex-wrap:wrap;align-items:center;padding:10px 12px;margin-top:12px;background:var(--surface2);border:1px solid var(--line);border-radius:12px;font-size:.86rem;position:sticky;bottom:10px;z-index:5;box-shadow:0 6px 22px rgba(20,40,33,.16)}
  .bulkbar.open{display:flex}.bulkbar select,.bulkbar input[type=text]{width:auto;padding:7px 10px;font-size:.84rem}.bulkbar .gap{flex:1 1 12px}
  input[type=checkbox],input[type=radio]{width:auto}
  @media (max-width:900px){

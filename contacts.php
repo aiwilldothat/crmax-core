@@ -189,16 +189,6 @@ head('Contacts', 'contacts', $u);
     <div class="empty"><div class="big">&#128100;</div>No contacts yet. <a href="<?= h(url('contacts.php?new=1')) ?>">Add one</a> or import a CSV.</div>
   <?php else: ?>
   <form method="post" id="bulk"><?= csrf_field() ?><input type="hidden" name="do" value="bulk"><input type="hidden" name="q" value="<?= h($q) ?>"><input type="hidden" name="tag" value="<?= h($tag) ?>"><input type="hidden" name="confirm" value="">
-  <div class="bulkbar" id="bulkbar">
-    <b><span id="bulkn">0</span> selected</b>
-    <select name="owner_id" aria-label="Assign the selected contacts to"><option value="">Assign to...</option><?= user_options(-1, 'Nobody (unassigned)') ?></select>
-    <button class="btn ghost sm" name="bulk" value="assign" onclick="return bulkGo('assign')">Assign</button>
-    <span class="gap"></span>
-    <input type="text" name="newtag" placeholder="Tag to add" maxlength="60" aria-label="Tag to add to the selected contacts" onkeydown="if(event.key==='Enter'){event.preventDefault();this.nextElementSibling.click();}">
-    <button class="btn ghost sm" name="bulk" value="tag" onclick="return bulkGo('tag')">Add tag</button>
-    <span class="gap"></span>
-    <button class="btn danger sm" name="bulk" value="delete" onclick="return bulkGo('delete')">Delete</button>
-  </div>
   <div class="scrollx"><table class="tbl"><thead><tr><th style="width:26px"><input type="checkbox" id="pickall" aria-label="Select all contacts shown" onclick="pickAll(this)"></th><th>Name</th><th>Email</th><th class="hide-sm">Phone</th><th>Company</th><th>Tags</th><th>Owner</th><th class="hide-sm">Added</th></tr></thead><tbody>
     <?php foreach ($rows as $c): $oid = (int) $c['owner_id']; ?>
     <tr><td><input type="checkbox" class="pick" name="ids[]" value="<?= (int) $c['id'] ?>" aria-label="Select <?= h(contact_name($c)) ?>" onclick="bulkCount()"></td>
@@ -210,6 +200,17 @@ head('Contacts', 'contacts', $u);
         <td class="muted small hide-sm"><?= h(date('j M Y', (int) $c['created_at'])) ?></td></tr>
     <?php endforeach; ?>
   </tbody></table></div>
+  <?php /* Shown once something is ticked. It sits under the list and sticks to the bottom of the window, so the rows do not jump when it appears. */ ?>
+  <div class="bulkbar" id="bulkbar">
+    <b><span id="bulkn">0</span> selected</b>
+    <select name="owner_id" aria-label="Assign the selected contacts to"><option value="">Assign to...</option><?= user_options(-1, 'Nobody (unassigned)') ?></select>
+    <button class="btn ghost sm" name="bulk" value="assign" onclick="return bulkGo('assign')">Assign</button>
+    <span class="gap"></span>
+    <input type="text" name="newtag" placeholder="Tag to add" maxlength="60" aria-label="Tag to add to the selected contacts" onkeydown="if(event.key==='Enter'){event.preventDefault();this.nextElementSibling.click();}">
+    <button class="btn ghost sm" name="bulk" value="tag" onclick="return bulkGo('tag')">Add tag</button>
+    <span class="gap"></span>
+    <button class="btn danger sm" name="bulk" value="delete" onclick="return bulkGo('delete')">Delete</button>
+  </div>
   </form>
   <script>
   function picked(){return document.querySelectorAll('#bulk .pick:checked').length;}

@@ -116,7 +116,7 @@ head('Dashboard', 'dash', $u);
     <?php if (!$myTasks): ?><div class="empty">No open tasks. <a href="<?= h(url('tasks.php')) ?>">Add one</a>.</div>
     <?php else: ?><table class="tbl"><?php foreach ($myTasks as $t): $overdue = $t['due_date'] !== '' && $t['due_date'] < date('Y-m-d'); ?>
       <tr><td><?= h($t['title']) ?><?php if ($t['contact_id'] && ($t['first_name'] || $t['email'])): ?> <span class="muted small">&middot; <a href="<?= h(url('contact.php?id=' . (int) $t['contact_id'])) ?>"><?= h(contact_name($t)) ?></a></span><?php endif; ?></td>
-          <td style="text-align:right;white-space:nowrap"><?= who_chip((int) $t['assigned_to'], $team, 'Assigned to') ?> <?php if ($t['due_date']): ?><span class="tag <?= $overdue ? 'bad' : '' ?>"><?= h($t['due_date']) ?></span><?php else: ?><span class="muted small">no date</span><?php endif; ?></td></tr>
+          <td style="text-align:right;white-space:nowrap"><?= $who === 'all' ? who_chip((int) $t['assigned_to'], $team, 'Assigned to') . ' ' : '' /* one person's list needs no badge on every row */ ?><?php if ($t['due_date']): ?><span class="tag <?= $overdue ? 'bad' : '' ?>"><?= h($t['due_date']) ?></span><?php else: ?><span class="muted small">no date</span><?php endif; ?></td></tr>
     <?php endforeach; ?></table><?php endif; ?>
   </div>
 </div>
