@@ -18,7 +18,7 @@ declare(strict_types=1);
 $CFG = is_file(__DIR__ . '/config.php') ? (include __DIR__ . '/config.php') : [];
 if (!is_array($CFG)) $CFG = [];
 
-const APP_VERSION = '1.1.1';
+const APP_VERSION = '1.2.0';
 define('APP_NAME', (string) ($CFG['app_name'] ?? 'CRMax Core'));
 define('DATA_DIR', (string) ($CFG['data_dir'] ?? (__DIR__ . '/data')));
 define('DB_FILE', (string) ($CFG['db_file'] ?? (DATA_DIR . '/crm.sqlite')));
@@ -152,6 +152,7 @@ function db_migrate(PDO $pdo): void {
     // Versioned upgrades. The tables above are the v1.0 shape; later versions only ever add to it.
     // A v1.0 database has no schema_version row and counts as version 1.
     if ((int) (setting_get('schema_version') ?? '1') < 2) migrate_v2($pdo);
+    if ((int) (setting_get('schema_version') ?? '1') < 3) migrate_v3($pdo);
 }
 /**
  * v1.1 (schema 2): company records, richer deals (expected close date, win probability, owner,
@@ -200,6 +201,38 @@ function migrate_v2(PDO $pdo): void {
         $pdo->exec("UPDATE deals SET company_id = COALESCE((SELECT c.company_id FROM contacts c WHERE c.id=deals.contact_id), 0) WHERE company_id=0 AND contact_id>0");
 
         setting_set('schema_version', '2');
+        $pdo->exec('COMMIT');
+    } catch (Throwable $e) {
+        $pdo->exec('ROLLBACK');
+        throw $e;
+    }
+}
+/**
+ * v1.2 (schema 3): ownership and assignment. Contacts, companies and deals already have an owner
+ * and tasks an assignee, so this only adds who created each task and the indexes behind the
+ * "Mine / a person" filters. It also tidies up after earlier versions, where removing a team member
+ * left their records pointing at nobody: those records become unassigned, so they show under
+ * "Unassigned" and can be handed to someone. Additive, safe to run twice, safe under two requests at once.
+ */
+function migrate_v3(PDO $pdo): void {
+    $pdo->exec('BEGIN IMMEDIATE');
+    try {
+        if ((int) (setting_get('schema_version') ?? '1') >= 3) { $pdo->exec('COMMIT'); return; }
+        $have = [];
+        foreach ($pdo->query("PRAGMA table_info(tasks)")->fetchAll() as $c) $have[$c['name']] = true;
+        if (!isset($have['created_by'])) $pdo->exec("ALTER TABLE tasks ADD COLUMN created_by INTEGER NOT NULL DEFAULT 0");
+        $pdo->exec("CREATE INDEX IF NOT EXISTS idx_contacts_owner ON contacts(owner_id)");
+        $pdo->exec("CREATE INDEX IF NOT EXISTS idx_deals_owner ON deals(owner_id)");
+        $pdo->exec("CREATE INDEX IF NOT EXISTS idx_tasks_assignee ON tasks(assigned_to, status)");
+
+        // Until now a task could only be assigned to the person who added it, so that person is its creator.
+        $pdo->exec("UPDATE tasks SET created_by=assigned_to WHERE created_by=0 AND assigned_to>0");
+        // Owners and assignees who are no longer on the team: the record becomes unassigned.
+        foreach (['contacts' => 'owner_id', 'companies' => 'owner_id', 'deals' => 'owner_id', 'tasks' => 'assigned_to'] as $tbl => $col) {
+            $pdo->exec("UPDATE $tbl SET $col=0 WHERE $col!=0 AND $col NOT IN (SELECT id FROM users)");
+        }
+
+        setting_set('schema_version', '3');
         $pdo->exec('COMMIT');
     } catch (Throwable $e) {
         $pdo->exec('ROLLBACK');
@@ -256,6 +289,10 @@ function user_by_id(int $id): ?array { $st = db()->prepare("SELECT * FROM users 
 function users_all(): array { return db()->query("SELECT * FROM users ORDER BY id")->fetchAll(); }
 function user_count(): int { return (int) db()->query("SELECT COUNT(*) FROM users")->fetchColumn(); }
 function is_admin(?array $u): bool { return $u && ($u['role'] ?? '') === 'admin'; }
+/** How a team member is shown in the app: their name, or their email address when no name was entered. */
+function user_label(?array $u): string { return $u ? ((string) ($u['name'] ?? '') !== '' ? (string) $u['name'] : (string) ($u['email'] ?? '')) : ''; }
+/** The id of a team member who exists and may be given records, or 0. */
+function valid_user_id(int $id): int { return $id > 0 && user_by_id($id) ? $id : 0; }
 
 /* ------------------------------------------------------------- sessions ---- */
 function sess_start(): void {

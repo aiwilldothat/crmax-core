@@ -95,6 +95,12 @@ function base_css(): string {
  .modalbg{display:none;position:fixed;inset:0;background:rgba(20,35,30,.42);z-index:40;align-items:flex-start;justify-content:center;padding:40px 14px;overflow:auto}
  .modalbg.open{display:flex}
  .modal{background:#fff;border:1px solid var(--line);border-radius:16px;padding:20px;width:100%;max-width:560px;box-shadow:0 20px 60px rgba(20,40,33,.2)}
+ .who{display:inline-flex;align-items:center;justify-content:center;min-width:24px;height:24px;padding:0 6px;border-radius:999px;background:var(--surface2);border:1px solid var(--line);font-family:inherit;font-size:.66rem;font-weight:700;line-height:1;color:var(--muted);vertical-align:middle;white-space:nowrap}
+ button.who{cursor:pointer}button.who:hover{border-color:var(--brand);color:#0a7a58}
+ .who.none{border-style:dashed;background:#fff;font-weight:400}
+ .bulkbar{display:none;gap:8px;flex-wrap:wrap;align-items:center;padding:10px 12px;margin-bottom:12px;background:var(--surface2);border:1px solid var(--line);border-radius:12px;font-size:.86rem}
+ .bulkbar.open{display:flex}.bulkbar select,.bulkbar input[type=text]{width:auto;padding:7px 10px;font-size:.84rem}.bulkbar .gap{flex:1 1 12px}
+ input[type=checkbox],input[type=radio]{width:auto}
  @media (max-width:900px){
    .side{position:fixed;left:-240px;z-index:50;transition:left .2s;box-shadow:4px 0 24px rgba(20,40,33,.12)}.side.open{left:0}
    .topbar{display:flex;align-items:center;gap:12px;padding:12px 14px;background:#fff;border-bottom:1px solid var(--line);position:sticky;top:0;z-index:30}
@@ -108,6 +114,67 @@ function base_css(): string {
  @media (max-width:560px){ .grid2,.grid3,.grid4{grid-template-columns:1fr} }
  button:focus-visible,a:focus-visible,input:focus-visible{outline:2px solid var(--brand2);outline-offset:2px}
 CSS;
+}
+
+/* ---- team pickers and the "whose records" filter ---- */
+/** <option> tags for choosing a team member. $selected is a user id; 0 selects the "nobody" option, which is left out when $noneLabel is ''. */
+function user_options(int $selected, string $noneLabel = '- unassigned -'): string {
+    $h = $noneLabel !== '' ? '<option value="0">' . h($noneLabel) . '</option>' : '';
+    foreach (users_all() as $us) $h .= '<option value="' . (int) $us['id'] . '"' . ((int) $us['id'] === $selected ? ' selected' : '') . '>' . h(user_label($us)) . '</option>';
+    return $h;
+}
+/**
+ * The "whose records" filter as a <select>: Everyone, Mine, Unassigned, then each other team member.
+ * $attrs are its extra attributes: name="who" inside a search form, or who_onchange() to reload the page.
+ */
+function who_select(string $who, array $me, string $attrs): string {
+    $opts = ['all' => 'Everyone', 'me' => 'Mine', 'none' => 'Unassigned'];
+    foreach (users_all() as $us) if ((int) $us['id'] !== (int) $me['id']) $opts['u' . (int) $us['id']] = user_label($us);
+    if ($who === (string) $me['id']) $who = 'me';
+    $h = '<select aria-label="Whose records to show" title="Whose records to show" style="width:auto" ' . $attrs . '>';
+    foreach ($opts as $k => $label) {
+        $v = $k[0] === 'u' ? substr($k, 1) : $k;
+        $h .= '<option value="' . h($v) . '"' . ($v === $who ? ' selected' : '') . '>' . h($label) . '</option>';
+    }
+    return $h . '</select>';
+}
+/** An onchange attribute for who_select() outside a form: load $path again for the chosen person. $path may carry other parameters. */
+function who_onchange(string $path): string {
+    return 'onchange="location=' . h(jscript(url($path . (str_contains($path, '?') ? '&' : '?') . 'who='))) . '+encodeURIComponent(this.value)"';
+}
+/** A small round badge with a team member's initials; their name shows on hover. '' when $userId is nobody. */
+function who_chip(int $userId, array $team, string $what = 'Owner'): string {
+    if (!$userId || !isset($team[$userId])) return '';
+    return '<span class="who" title="' . h($what . ': ' . $team[$userId]) . '">' . h(initials((string) $team[$userId])) . '</span>';
+}
+/**
+ * The same badge as a button that changes who something is assigned to, straight from a list: a click
+ * swaps it for a picker, and choosing a name posts $fields (plus the CSRF token) with the new id in
+ * $name. Needs pick_user_js() once on the page.
+ */
+function who_button(int $userId, array $team, array $fields, string $name, string $what = 'Assigned to'): string {
+    $known = $userId && isset($team[$userId]);
+    return '<button type="button" class="who' . ($known ? '' : ' none') . '" title="' . h($known ? $what . ': ' . $team[$userId] . ' - click to change' : 'Unassigned - click to assign')
+        . '" aria-label="' . h($known ? $what . ' ' . $team[$userId] . '. Change' : 'Unassigned. Assign') . '" onclick="pickUser(this,' . h(jscript($fields)) . ',' . h(jscript($name)) . ',' . (int) $userId . ')">'
+        . h($known ? initials((string) $team[$userId]) : '+') . '</button>';
+}
+/** The script behind who_button(). Print it once per page, after the list. */
+function pick_user_js(): string {
+    $team = [];
+    foreach (users_all() as $us) $team[] = [(int) $us['id'], user_label($us)];
+    return '<script>var TEAM=' . jscript($team) . ',CSRF=' . jscript(csrf()) . ';
+function pickUser(btn,fields,name,current){
+ var f=document.createElement("form"),s=document.createElement("select"),done=false;
+ f.method="post";f.style.display="inline";fields.csrf=CSRF;
+ for(var k in fields){var i=document.createElement("input");i.type="hidden";i.name=k;i.value=fields[k];f.appendChild(i);}
+ s.name=name;s.setAttribute("aria-label","Assign to");s.style.cssText="width:auto;max-width:170px;padding:4px 8px;font-size:.8rem";
+ [[0,"Unassigned"]].concat(TEAM).forEach(function(t){var o=document.createElement("option");o.value=t[0];o.textContent=t[1];s.appendChild(o);});
+ s.value=current;
+ s.onchange=function(){done=true;f.submit();};
+ s.onblur=function(){if(!done&&f.parentNode)f.parentNode.replaceChild(btn,f);};
+ f.appendChild(s);btn.parentNode.replaceChild(f,btn);s.focus();
+}
+</script>';
 }
 
 function head(string $title, string $active = '', ?array $u = null): void {

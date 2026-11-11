@@ -128,32 +128,97 @@ function render_merge(string $text, array $c): string {
 /**
  * Insert or update a contact, de-duplicating on email. Fires the contact_created workflow trigger for a
  * new contact, and tag_added for each tag the contact gains. Tags are replaced only when $in has 'tags'.
+ * Returns the contact's id; contact_upsert_info() does the same and also says what happened.
  */
-function contact_upsert(array $in, string $source = ''): int {
+function contact_upsert(array $in, string $source = '', array $opts = []): int { return contact_upsert_info($in, $source, $opts)['id']; }
+/**
+ * contact_upsert() with its outcome:
+ * ['id' => int, 'created' => bool, 'owner_id' => int, 'assigned' => bool, 'notified' => string].
+ *
+ * Who owns the contact: an 'owner_id' in $in always wins (0 = nobody). Without one, a NEW contact goes
+ * to whoever the lead routing rule in Settings picks, and a contact that already exists keeps its owner.
+ * 'assigned' is true when this call gave the contact to 'owner_id'. That person is emailed, and
+ * 'notified' is the address the email went to ('' when none was sent).
+ * $opts: 'notify' => false sends no email (bulk callers send one summary instead); 'via' says where the
+ * contact came from, for the email ('the form "Contact us"'); 'actor' is the signed-in person doing this.
+ * Routing and the email can never make the save fail - forms, imports and the API all pass through here.
+ */
+function contact_upsert_info(array $in, string $source = '', array $opts = []): array {
     $email = mb_strtolower(trim((string) ($in['email'] ?? '')));
     $existing = null;
-    if ($email !== '') { $st = db()->prepare("SELECT * FROM contacts WHERE email=? LIMIT 1"); $st->execute([$email]); $existing = $st->fetch() ?: null; }
+    if ($email !== '') {
+        $st = db()->prepare("SELECT * FROM contacts WHERE email=? LIMIT 1"); $st->execute([$email]); $existing = $st->fetch() ?: null;
+        $st = null;   // finish the read before writing: a query left open makes the save fail when another request writes in between
+    }
     $fields = ['first_name', 'last_name', 'email', 'phone', 'company', 'address', 'source'];
     $data = [];
     foreach ($fields as $f) if (isset($in[$f]) && $in[$f] !== '') $data[$f] = (string) $in[$f];
     if ($email !== '') $data['email'] = $email;
     if (isset($in['tags'])) $data['tags'] = json_encode(array_values(array_filter(array_map('trim', (array) $in['tags']))), JSON_UNESCAPED_SLASHES);
     if (isset($in['custom'])) $data['custom'] = json_encode((array) $in['custom'], JSON_UNESCAPED_SLASHES);
+    $ownerGiven = array_key_exists('owner_id', $in) && $in['owner_id'] !== null && $in['owner_id'] !== '';
+    $notify = ($opts['notify'] ?? true) !== false;
+    $actor = is_array($opts['actor'] ?? null) ? $opts['actor'] : null;
     if ($existing) {
+        $id = (int) $existing['id'];
+        $owner = (int) $existing['owner_id'];
+        if ($ownerGiven) { $owner = valid_user_id((int) $in['owner_id']); $data['owner_id'] = $owner; }
         $data['updated_at'] = time();
-        go_update('contacts', (int) $existing['id'], $data);
-        if (isset($data['company'])) contact_set_company((int) $existing['id'], $data['company']);
-        if (isset($data['tags'])) wf_fire_tags_added((int) $existing['id'], jdec($existing['tags']), jdec($data['tags']));
-        return (int) $existing['id'];
+        go_update('contacts', $id, $data);
+        if (isset($data['company'])) contact_set_company($id, $data['company']);
+        if (isset($data['tags'])) wf_fire_tags_added($id, jdec($existing['tags']), jdec($data['tags']));
+        $assigned = $owner > 0 && $owner !== (int) $existing['owner_id'];
+        $sent = $notify && $assigned ? notify_assigned('contact', $owner, $actor, go_get('contacts', $id) ?? $existing) : '';
+        return ['id' => $id, 'created' => false, 'owner_id' => $owner, 'assigned' => $assigned, 'notified' => $sent];
     }
     if ($source !== '') $data['source'] = $source;
+    if ($ownerGiven) $owner = valid_user_id((int) $in['owner_id']);
+    else { try { $owner = lead_route_next(); } catch (Throwable $e) { $owner = 0; } }   // routing must never stop a lead being saved
+    $data['owner_id'] = $owner;
     $data['created_at'] = time(); $data['updated_at'] = time();
     $id = go_insert('contacts', $data);
     if (isset($data['company'])) contact_set_company($id, $data['company']);
     act_log($id, 'contact_created', ['source' => $source]);
     wf_fire('contact_created', $id);
     if (isset($data['tags'])) wf_fire_tags_added($id, [], jdec($data['tags']));
-    return $id;
+    $sent = '';
+    if ($notify && $owner) {
+        $via = (string) ($opts['via'] ?? '');
+        if ($via === '') $via = str_starts_with($source, 'form:') ? 'a form' : ($source === 'import' ? 'a CSV import' : ($source !== '' ? $source : 'an integration'));
+        $sent = notify_assigned('lead', $owner, $actor, go_get('contacts', $id) ?? [], ['via' => $via, 'custom' => (array) ($in['custom'] ?? [])]);
+    }
+    return ['id' => $id, 'created' => true, 'owner_id' => $owner, 'assigned' => $owner > 0, 'notified' => $sent];
+}
+/** Delete a contact with its notes, tasks, activity, form submissions and workflow runs. Its deals are kept, unlinked. */
+function contact_delete(int $id): bool {
+    if ($id <= 0 || !go_get('contacts', $id)) return false;
+    foreach (['notes', 'tasks', 'activities', 'form_submissions', 'wf_enrollments'] as $tbl) db()->prepare("DELETE FROM $tbl WHERE contact_id=?")->execute([$id]);
+    db()->prepare("UPDATE deals SET contact_id=0 WHERE contact_id=?")->execute([$id]);
+    go_del('contacts', $id);
+    return true;
+}
+/**
+ * Delete several contacts as one all-or-nothing change, then tell add-ons about each one that went
+ * (the contact_deleted hook, outside the transaction). Returns how many were deleted.
+ */
+function contacts_delete(array $ids): int {
+    $gone = db_tx(function () use ($ids) { $gone = []; foreach ($ids as $id) if (contact_delete((int) $id)) $gone[] = (int) $id; return $gone; });
+    foreach ($gone as $id) addon_hook('contact_deleted', $id);
+    return count($gone);
+}
+/**
+ * Add tags to a contact, leaving alone the ones it already has. Each tag that is new to the contact
+ * fires the tag_added workflow trigger. Returns how many tags were added.
+ */
+function contact_add_tags(int $contactId, array $tags): int {
+    $c = go_get('contacts', $contactId);
+    if (!$c) return 0;
+    $before = jdec($c['tags']); $have = $before; $added = 0;
+    foreach ($tags as $t) { $t = trim((string) $t); if ($t !== '' && !in_array($t, $have, true)) { $have[] = $t; $added++; } }
+    if (!$added) return 0;
+    go_update('contacts', $contactId, ['tags' => json_encode(array_values($have), JSON_UNESCAPED_SLASHES), 'updated_at' => time()]);
+    wf_fire_tags_added($contactId, $before, $have);
+    return $added;
 }
 
 /* ============================================================ COMPANIES ----- */
@@ -278,6 +343,277 @@ function initials(string $name): string {
     return $s !== '' ? $s : '?';
 }
 
+/* ============================================================ TEAM AND OWNERSHIP */
+/** Team members as id => display name, in the order they joined. */
+function team_map(): array { $m = []; foreach (users_all() as $us) $m[(int) $us['id']] = user_label($us); return $m; }
+/**
+ * The "whose records" choice on a list page: 'all' (everyone), 'me', 'none' (unassigned) or a team
+ * member's id. It is picked with ?who= and remembered per page for the rest of the session, so it
+ * is still there after saving a record or moving a deal.
+ */
+function who_filter(string $page): string {
+    sess_start();
+    if (isset($_GET['who'])) {
+        $w = is_string($_GET['who']) ? $_GET['who'] : '';
+        $_SESSION['who'][$page] = (in_array($w, ['all', 'me', 'none'], true) || (ctype_digit($w) && strlen($w) < 10 && (int) $w > 0)) ? $w : 'all';
+    }
+    $w = (string) ($_SESSION['who'][$page] ?? 'all');
+    if (ctype_digit($w) && !user_by_id((int) $w)) $w = 'all';   // that person is no longer on the team
+    return $w;
+}
+/** The SQL test, and its values, that applies a who_filter() choice to the column $col. ['', []] means everyone. */
+function who_sql(string $col, string $who, int $me): array {
+    if ($who === 'me') return ["$col=?", [$me]];
+    if ($who === 'none') return ["$col=0", []];
+    if (ctype_digit($who) && (int) $who > 0) return ["$col=?", [(int) $who]];
+    return ['', []];
+}
+/**
+ * The team member chosen in a posted picker: 0 for "nobody", and $default when the field was not
+ * sent at all (a page from before the picker existed) or names someone who is not on the team.
+ */
+function posted_user(string $field, int $default): int {
+    $v = $_POST[$field] ?? null;
+    if (!is_scalar($v) || trim((string) $v) === '') return $default;
+    if (trim((string) $v) === '0') return 0;
+    return valid_user_id((int) $v) ?: $default;
+}
+/** Give a contact to a team member (0 = nobody) and email them. Returns true when the owner changed. */
+function contact_assign(int $contactId, int $ownerId, ?array $actor = null): bool {
+    $c = go_get('contacts', $contactId);
+    if (!$c || (int) $c['owner_id'] === $ownerId) return false;
+    go_update('contacts', $contactId, ['owner_id' => $ownerId, 'updated_at' => time()]);
+    notify_assigned('contact', $ownerId, $actor, $c);
+    return true;
+}
+/**
+ * Give several contacts to one team member (0 = nobody) at once. Contacts that are already theirs are
+ * left alone. Returns how many changed hands; the new owner gets one email, however many there were.
+ */
+function contacts_assign(array $ids, int $ownerId, ?array $actor = null): int {
+    $ids = array_values(array_unique(array_filter(array_map('intval', $ids), fn($i) => $i > 0)));
+    if (!$ids) return 0;
+    $changed = (int) db_tx(function () use ($ids, $ownerId) {
+        $n = 0;
+        foreach (array_chunk($ids, 400) as $chunk) {
+            $st = db()->prepare("UPDATE contacts SET owner_id=?, updated_at=? WHERE owner_id!=? AND id IN (" . implode(',', array_fill(0, count($chunk), '?')) . ")");
+            $st->execute(array_merge([$ownerId, time(), $ownerId], $chunk));
+            $n += $st->rowCount();
+        }
+        return $n;
+    });
+    if ($changed > 0) notify_assigned('contacts', $ownerId, $actor, [], ['count' => $changed]);
+    return $changed;
+}
+/** Add a task and email its assignee (unless they added it themselves). Returns the new task's id. */
+function task_add(string $title, string $dueDate, int $contactId, int $assignedTo, ?array $actor = null): int {
+    $id = go_insert('tasks', ['contact_id' => $contactId, 'title' => $title, 'due_date' => valid_date($dueDate), 'status' => 'open',
+        'assigned_to' => $assignedTo, 'created_by' => (int) ($actor['id'] ?? 0), 'created_at' => time()]);
+    notify_assigned('task', $assignedTo, $actor, go_get('tasks', $id) ?? []);
+    return $id;
+}
+/** Assign a task to a team member (0 = nobody) and email them if it is still open. Returns true when the assignee changed. */
+function task_assign(int $taskId, int $userId, ?array $actor = null): bool {
+    $t = go_get('tasks', $taskId);
+    if (!$t || (int) $t['assigned_to'] === $userId) return false;
+    go_update('tasks', $taskId, ['assigned_to' => $userId]);
+    if ($t['status'] === 'open') notify_assigned('task', $userId, $actor, $t);
+    return true;
+}
+/** What a team member owns: ['contacts' => n, 'companies' => n, 'deals' => n, 'tasks' => n, 'open_tasks' => n]. */
+function user_owned_counts(int $userId): array {
+    $n = fn(string $sql) => (int) db()->query($sql . $userId)->fetchColumn();
+    return [
+        'contacts'   => $n("SELECT COUNT(*) FROM contacts WHERE owner_id="),
+        'companies'  => $n("SELECT COUNT(*) FROM companies WHERE owner_id="),
+        'deals'      => $n("SELECT COUNT(*) FROM deals WHERE owner_id="),
+        'tasks'      => $n("SELECT COUNT(*) FROM tasks WHERE assigned_to="),
+        'open_tasks' => $n("SELECT COUNT(*) FROM tasks WHERE status='open' AND assigned_to="),
+    ];
+}
+/**
+ * Remove a team member and hand everything they own - contacts, companies, deals and tasks - to
+ * $inheritId (0 = leave it unassigned), so nothing is left pointing at someone who is gone. They also
+ * come out of the lead routing rule. It all happens together or not at all. Returns what changed hands.
+ */
+function user_remove(int $userId, int $inheritId): array {
+    $counts = user_owned_counts($userId);
+    db_tx(function () use ($userId, $inheritId) {
+        foreach (['contacts' => 'owner_id', 'companies' => 'owner_id', 'deals' => 'owner_id', 'tasks' => 'assigned_to'] as $tbl => $col) {
+            db()->prepare("UPDATE $tbl SET $col=? WHERE $col=?")->execute([$inheritId, $userId]);
+        }
+        $r = lead_routing();
+        if ($r['user_id'] === $userId || in_array($userId, $r['user_ids'], true)) {
+            $fixed = $r['user_id'] === $userId ? $inheritId : $r['user_id'];   // leads that went to them now go to whoever took over
+            $people = array_values(array_diff($r['user_ids'], [$userId]));
+            $mode = $r['mode'];
+            if (($mode === 'fixed' && !$fixed) || ($mode === 'round_robin' && !$people)) $mode = 'none';
+            lead_routing_set($mode, $fixed, $people);
+        }
+        go_del('users', $userId);
+    });
+    return $counts;
+}
+
+/* ============================================================ LEAD ROUTING -- */
+/**
+ * Who gets a new contact that arrives without an owner - from a form, the API or a CSV import.
+ * An admin sets it in Settings. Returns ['mode' => 'none' | 'fixed' | 'round_robin', 'user_id' => int
+ * (the one person, for 'fixed'), 'user_ids' => int[] (the people taking turns, for 'round_robin')].
+ */
+function lead_routing(): array {
+    $r = jdec(setting_get('lead_routing', ''));
+    $ids = array_values(array_unique(array_filter(array_map('intval', (array) ($r['user_ids'] ?? [])), fn($i) => $i > 0)));
+    return ['mode' => in_array($r['mode'] ?? '', ['fixed', 'round_robin'], true) ? (string) $r['mode'] : 'none', 'user_id' => max(0, (int) ($r['user_id'] ?? 0)), 'user_ids' => $ids];
+}
+/** Save the lead routing rule. When the rule really changes, round-robin starts again from the first person. */
+function lead_routing_set(string $mode, int $userId, array $userIds): void {
+    $before = lead_routing();
+    setting_set('lead_routing', json_encode(['mode' => $mode, 'user_id' => $userId, 'user_ids' => array_values(array_map('intval', $userIds))]));
+    if (lead_routing() !== $before) setting_set('lead_routing_ptr', '0');
+}
+/** Those of $ids who are still on the team and active, in the order given. */
+function lead_routing_people(array $ids): array {
+    $active = [];
+    foreach (users_all() as $us) if ($us['status'] === 'active') $active[(int) $us['id']] = true;
+    return array_values(array_filter(array_map('intval', $ids), fn($i) => isset($active[$i])));
+}
+/** Who the next routed lead would go to (0 = nobody), without taking the turn. */
+function lead_route_peek(): int {
+    $r = lead_routing();
+    if ($r['mode'] === 'fixed') return lead_routing_people([$r['user_id']])[0] ?? 0;
+    if ($r['mode'] !== 'round_robin') return 0;
+    $people = lead_routing_people($r['user_ids']);
+    return $people ? $people[(int) setting_get('lead_routing_ptr', '0') % count($people)] : 0;
+}
+/**
+ * The team member the next new lead goes to, or 0 to leave it unassigned.
+ *
+ * Round-robin keeps a turn counter in the settings table. Taking a turn is a compare-and-swap: the
+ * counter only moves on from the exact value this request read. If two leads arrive at the same
+ * moment, one update changes the row and the other changes nothing, re-reads and takes the next turn -
+ * so a turn is never handed out twice and never skipped, whatever the web server runs in parallel.
+ */
+function lead_route_next(): int {
+    $r = lead_routing();
+    if ($r['mode'] === 'fixed') return lead_routing_people([$r['user_id']])[0] ?? 0;
+    if ($r['mode'] !== 'round_robin') return 0;
+    $people = lead_routing_people($r['user_ids']);
+    if (count($people) < 2) return $people[0] ?? 0;
+    $take = db()->prepare("UPDATE settings SET v=? WHERE k='lead_routing_ptr' AND v=?");
+    for ($try = 0; $try < 100; $try++) {
+        $raw = setting_get('lead_routing_ptr');
+        if ($raw === null) { db()->exec("INSERT OR IGNORE INTO settings (k,v) VALUES ('lead_routing_ptr','0')"); continue; }
+        $turn = ctype_digit($raw) && strlen($raw) < 10 ? (int) $raw : 0;
+        $take->execute([(string) ($turn + 1), $raw]);
+        if ($take->rowCount() === 1) return $people[$turn % count($people)];
+    }
+    return $people[random_int(0, count($people) - 1)];   // could not get a turn after 100 tries: still give the lead to someone
+}
+
+/* ============================================================ ASSIGNMENT EMAIL */
+/** Whether people are emailed when something is assigned to them. On, unless an admin switches it off in Settings. */
+function assign_emails_on(): bool { return setting_get('assign_emails', '1') !== '0'; }
+/** A label and value table for a notification email, from a list of [label, value] pairs. Empty values are left out. */
+function mail_rows(array $pairs): string {
+    $h = '';
+    foreach ($pairs as [$label, $value]) {
+        $value = trim((string) $value);
+        if ($value !== '') $h .= '<tr><td style="padding:3px 14px 3px 0;color:#5f7269;vertical-align:top">' . h((string) $label) . ': </td><td style="padding:3px 0"><b>' . nl2br(h(mb_substr($value, 0, 600))) . "</b></td></tr>\n";
+    }
+    return $h !== '' ? "<table style=\"border-collapse:collapse;margin:12px 0\">\n" . $h . "</table>\n" : '';
+}
+/** A button that opens a page of this CRM, with the address written out underneath for mail readers that show plain text. */
+function mail_button(string $path, string $label): string {
+    $url = base_url() . '/' . ltrim($path, '/');
+    return '<p style="margin:18px 0 6px"><a href="' . h($url) . '" style="display:inline-block;background:#0ca678;color:#fff;font-weight:700;text-decoration:none;border-radius:999px;padding:9px 20px">' . h($label) . "</a></p>\n"
+        . '<p style="font-size:12px;color:#7a8c84;margin:0">' . h($url) . "</p>\n";
+}
+/**
+ * Email one team member. Returns the address it went to, or '' when nothing was sent. It stays quiet -
+ * no error, no exception - when no email account is set up yet, assignment emails are switched off,
+ * the person is no longer on the team, or the mail server refuses the message.
+ */
+function notify_user(int $userId, string $subject, string $bodyHtml): string {
+    try {
+        if ($userId <= 0 || !assign_emails_on() || !email_ready()) return '';
+        $to = user_by_id($userId);
+        if (!$to || $to['status'] !== 'active' || !filter_var((string) $to['email'], FILTER_VALIDATE_EMAIL)) return '';
+        $subject = mb_substr(trim((string) preg_replace('/\s+/', ' ', $subject)), 0, 150);
+        $res = send_mail((string) $to['email'], $subject, email_wrap($bodyHtml, ['footer' => 'You are getting this because something in ' . h(org_name()) . ' was assigned to you.']));
+        return !empty($res['ok']) ? mb_strtolower((string) $to['email']) : '';
+    } catch (Throwable $e) { return ''; }
+}
+/**
+ * Tell a team member that something is now theirs. $kind is what it is: 'lead' (a new contact),
+ * 'contact', 'contacts' (several at once), 'company', 'deal', 'task', or 'inherit' (the records of a
+ * member who was removed). $actor is the signed-in person who did it - null for lead routing, imports
+ * and the API - and nobody is emailed about their own action. Returns the address emailed, or ''.
+ * Like notify_user() it never throws: an assignment must not fail because its email could not go out.
+ */
+function notify_assigned(string $kind, int $toUserId, ?array $actor, array $rec, array $extra = []): string {
+    try {
+        if ($toUserId <= 0 || ($actor && (int) ($actor['id'] ?? 0) === $toUserId)) return '';
+        $by = $actor ? h(user_label($actor)) : '';
+        $rid = (int) ($rec['id'] ?? 0);
+        $person = fn(?array $c): string => $c ? contact_name($c) : '';
+        if ($kind === 'lead' || $kind === 'contact') {
+            $rows = [['Name', trim(($rec['first_name'] ?? '') . ' ' . ($rec['last_name'] ?? ''))], ['Email', $rec['email'] ?? ''], ['Phone', $rec['phone'] ?? ''], ['Company', $rec['company'] ?? ''], ['Source', $rec['source'] ?? '']];
+            if ($kind === 'lead') {
+                foreach (array_slice((array) ($extra['custom'] ?? []), 0, 15, true) as $k => $v) if (is_scalar($v)) $rows[] = [(string) $k, (string) $v];
+                $subject = 'New lead for you: ' . contact_name($rec);
+                $intro = 'A new contact came in through ' . h((string) ($extra['via'] ?? 'an integration')) . ' and is yours to follow up.';
+            } else {
+                $subject = 'Contact assigned to you: ' . contact_name($rec);
+                $intro = $by !== '' ? $by . ' assigned this contact to you.' : 'This contact was assigned to you.';
+            }
+            $body = mail_rows($rows) . mail_button('contact.php?id=' . $rid, 'Open the contact');
+        } elseif ($kind === 'contacts') {
+            $n = (int) ($extra['count'] ?? 0);
+            $what = $n . ' contact' . ($n === 1 ? '' : 's');
+            $subject = $what . ' assigned to you';
+            if (($extra['why'] ?? '') === 'import') $intro = $what . ' from a CSV import ' . ($n === 1 ? 'was' : 'were') . ' assigned to you.';
+            else $intro = $by !== '' ? $by . ' assigned ' . $what . ' to you.' : $what . ' ' . ($n === 1 ? 'was' : 'were') . ' assigned to you.';
+            $body = mail_button('contacts.php?who=me', 'See your contacts');
+        } elseif ($kind === 'company') {
+            $subject = 'Company assigned to you: ' . ($rec['name'] ?? '');
+            $intro = $by !== '' ? $by . ' made you the owner of this company.' : 'You are now the owner of this company.';
+            $body = mail_rows([['Company', $rec['name'] ?? ''], ['Website', $rec['website'] ?? ''], ['Phone', $rec['phone'] ?? ''], ['Industry', $rec['industry'] ?? '']])
+                . mail_button('company.php?id=' . $rid, 'Open the company');
+        } elseif ($kind === 'deal') {
+            $pipe = go_get('pipelines', (int) ($rec['pipeline_id'] ?? 0));
+            $co = (int) ($rec['company_id'] ?? 0) ? go_get('companies', (int) $rec['company_id']) : null;
+            $ct = (int) ($rec['contact_id'] ?? 0) ? go_get('contacts', (int) $rec['contact_id']) : null;
+            $close = (string) ($rec['close_date'] ?? '');
+            $subject = 'Deal assigned to you: ' . ($rec['name'] ?? '');
+            $intro = $by !== '' ? $by . ' made you the owner of this deal.' : 'You are now the owner of this deal.';
+            $body = mail_rows([['Deal', $rec['name'] ?? ''], ['Value', money((int) ($rec['value_cents'] ?? 0))], ['Stage', $pipe ? (string) (jdec($pipe['stages'])[(int) ($rec['stage'] ?? 0)] ?? '') : ''],
+                    ['Expected close', $close !== '' ? date('j M Y', (int) strtotime($close)) : ''], ['Company', $co['name'] ?? ''], ['Contact', $person($ct)]])
+                . mail_button('pipelines.php?id=' . (int) ($rec['pipeline_id'] ?? 0) . '&deal=' . $rid, 'Open the deal');
+        } elseif ($kind === 'task') {
+            $ct = (int) ($rec['contact_id'] ?? 0) ? go_get('contacts', (int) $rec['contact_id']) : null;
+            $due = (string) ($rec['due_date'] ?? '');
+            $subject = 'Task for you: ' . ($rec['title'] ?? '');
+            $intro = $by !== '' ? $by . ' gave you a task.' : 'A task was assigned to you.';
+            $body = mail_rows([['Task', $rec['title'] ?? ''], ['Due', valid_date($due) !== '' ? date('j M Y', (int) strtotime($due)) : 'No due date'], ['About', $person($ct)]])
+                . mail_button('tasks.php?who=me', 'See your tasks');
+        } elseif ($kind === 'inherit') {
+            $parts = [];
+            foreach (['contacts' => 'contact', 'companies' => 'company', 'deals' => 'deal', 'tasks' => 'task'] as $k => $one) {
+                $n = (int) ($extra['counts'][$k] ?? 0);
+                if ($n > 0) $parts[] = $n . ' ' . ($n === 1 ? $one : ($one === 'company' ? 'companies' : $one . 's'));
+            }
+            if (!$parts) return '';
+            $subject = 'Records passed to you';
+            $intro = ($by !== '' ? $by : 'An administrator') . ' removed ' . h((string) ($extra['name'] ?? 'a team member')) . ' from the team and passed their records to you: ' . implode(', ', $parts) . '.';
+            $body = mail_button('index.php?who=me', 'Open your dashboard');
+        } else {
+            return '';
+        }
+        return notify_user($toUserId, $subject, '<p>' . $intro . "</p>\n" . $body);
+    } catch (Throwable $e) { return ''; }
+}
+
 /* ============================================================ FORMS --------- */
 /** Handle a public form submission. Returns ['ok'=>bool,'err'=>string,'contact_id'=>int]. */
 function form_handle_submit(array $form, array $post): array {
@@ -292,9 +628,11 @@ function form_handle_submit(array $form, array $post): array {
         else $extra[$f['label'] ?? $key] = $val;
     }
     if (($map['email'] ?? '') !== '' && !filter_var($map['email'], FILTER_VALIDATE_EMAIL)) return ['ok' => false, 'err' => 'Please enter a valid email address.', 'contact_id' => 0];
-    $cid = 0;
+    $cid = 0; $leadTo = '';
     if (($map['email'] ?? '') !== '' || ($map['phone'] ?? '') !== '') {
-        $cid = contact_upsert($map + ['custom' => $extra], 'form:' . $form['slug']);
+        // A new contact is routed to its owner here (Settings > Lead routing), and that person is emailed the lead.
+        $saved = contact_upsert_info($map + ['custom' => $extra], 'form:' . $form['slug'], ['via' => 'the form "' . $form['name'] . '"']);
+        $cid = $saved['id']; $leadTo = $saved['notified'];
     }
     $subId = go_insert('form_submissions', ['form_id' => (int) $form['id'], 'contact_id' => $cid, 'data' => json_encode($map + $extra, JSON_UNESCAPED_SLASHES), 'created_at' => time()]);
     db()->prepare("UPDATE forms SET submits=submits+1 WHERE id=?")->execute([(int) $form['id']]);
@@ -303,7 +641,8 @@ function form_handle_submit(array $form, array $post): array {
     if ((int) $form['notify'] === 1) {
         $to = (string) (org()['notify_email'] ?? '');
         if ($to === '') { $admin = db()->query("SELECT email FROM users WHERE role='admin' ORDER BY id LIMIT 1")->fetchColumn(); $to = $admin ?: ''; }
-        if ($to !== '') {
+        // The lead's new owner has just been sent these details, so they are not emailed a second time.
+        if ($to !== '' && mb_strtolower(trim($to)) !== $leadTo) {
             $rows = '';
             foreach (($map + $extra) as $k => $v) $rows .= '<tr><td style="padding:4px 10px;color:#5f7269">' . h((string) $k) . '</td><td style="padding:4px 10px"><b>' . h((string) $v) . '</b></td></tr>';
             send_mail($to, 'New form submission: ' . $form['name'], '<p>A new submission came in via <b>' . h($form['name']) . '</b>:</p><table>' . $rows . '</table>');
@@ -378,7 +717,8 @@ function wf_run_due(int $limit = 100): int {
                 wf_fire_tags_added((int) $c['id'], $before, $tags);
             }
         } elseif ($type === 'task') {
-            go_insert('tasks', ['contact_id' => (int) $c['id'], 'title' => render_merge((string) ($step['title'] ?? 'Follow up'), $c), 'due_date' => date('Y-m-d', time() + max(0, (int) ($step['due_days'] ?? 1)) * 86400), 'status' => 'open', 'created_at' => time()]);
+            // The task goes to the contact's owner, so it shows in their "Mine" list. No email: it was not a person who assigned it.
+            go_insert('tasks', ['contact_id' => (int) $c['id'], 'title' => render_merge((string) ($step['title'] ?? 'Follow up'), $c), 'due_date' => date('Y-m-d', time() + max(0, (int) ($step['due_days'] ?? 1)) * 86400), 'status' => 'open', 'assigned_to' => valid_user_id((int) $c['owner_id']), 'created_at' => time()]);
         }
         // advance to next step immediately (unless it was a wait, handled above)
         go_update('wf_enrollments', (int) $en['id'], ['step' => $i + 1, 'next_at' => time(), 'status' => isset($steps[$i + 1]) ? 'active' : 'done']);

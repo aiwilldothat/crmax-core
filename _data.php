@@ -13,7 +13,7 @@ function go_cols(string $table): array {
         'contacts'           => ['first_name', 'last_name', 'email', 'phone', 'company', 'company_id', 'address', 'tags', 'custom', 'source', 'owner_id', 'dnd_email', 'created_at', 'updated_at'],
         'companies'          => ['name', 'domain', 'phone', 'website', 'address', 'industry', 'notes', 'custom', 'owner_id', 'created_at', 'updated_at'],
         'notes'              => ['contact_id', 'user_id', 'body', 'created_at'],
-        'tasks'              => ['contact_id', 'title', 'due_date', 'status', 'assigned_to', 'created_at'],
+        'tasks'              => ['contact_id', 'title', 'due_date', 'status', 'assigned_to', 'created_by', 'created_at'],
         'activities'         => ['contact_id', 'type', 'meta', 'created_at'],
         'pipelines'          => ['name', 'stages', 'stage_probs', 'created_at'],
         'deals'              => ['pipeline_id', 'contact_id', 'company_id', 'name', 'stage', 'value_cents', 'status', 'close_date', 'probability', 'owner_id', 'closed_at', 'lost_reason', 'notes', 'created_at', 'updated_at'],
@@ -51,3 +51,26 @@ function go_update(string $table, int $id, array $data): void {
     db()->prepare("UPDATE $table SET " . implode(',', $set) . " WHERE id=?")->execute($vals);
 }
 function go_del(string $table, int $id): void { db()->prepare("DELETE FROM $table WHERE id=?")->execute([$id]); }
+/**
+ * Run $fn as one all-or-nothing change and return its result. The write lock is taken up front, so a
+ * request that arrives at the same moment waits its turn instead of failing. Calls may nest: an inner
+ * call simply joins the transaction that is already open. Read what you need before calling this, or
+ * inside it - never while a query from outside is still being looped over.
+ */
+function db_tx(callable $fn) {
+    static $depth = 0;
+    if ($depth > 0) return $fn();
+    $pdo = db();
+    $pdo->exec('BEGIN IMMEDIATE');
+    $depth++;
+    try {
+        $out = $fn();
+        $pdo->exec('COMMIT');
+        return $out;
+    } catch (Throwable $e) {
+        try { $pdo->exec('ROLLBACK'); } catch (Throwable $ignored) { /* nothing left to undo */ }
+        throw $e;
+    } finally {
+        $depth--;
+    }
+}
