@@ -187,12 +187,12 @@ head('Pipeline', 'pipelines', $u);
 
 <?php if ($closed): ?>
 <div class="card" style="margin-top:16px"><h2>Recently closed</h2>
-  <div class="scrollx"><table class="tbl"><thead><tr><th>Deal</th><th>Company / contact</th><th>Outcome</th><th>Closed</th><th style="text-align:right">Value</th><th></th></tr></thead><tbody>
+  <div class="scrollx"><table class="tbl"><thead><tr><th>Deal</th><th class="hide-sm">Company / contact</th><th>Outcome</th><th class="hide-sm">Closed</th><th style="text-align:right">Value</th><th></th></tr></thead><tbody>
   <?php foreach ($closed as $d): $person = ((int) $d['contact_id'] && ($d['first_name'] || $d['last_name'] || $d['email'])) ? contact_name($d) : ''; ?>
     <tr><td><a href="<?= h(url('pipelines.php?id=' . $pid . '&deal=' . (int) $d['id'])) ?>" onclick="openDeal(<?= (int) $d['id'] ?>);return false"><b><?= h($d['name']) ?></b></a></td>
-        <td class="muted"><?= h(trim(($d['company_name'] ?? '') . (($d['company_name'] ?? '') !== '' && $person !== '' ? ' / ' : '') . $person)) ?: '-' ?></td>
+        <td class="muted hide-sm"><?= h(trim(($d['company_name'] ?? '') . (($d['company_name'] ?? '') !== '' && $person !== '' ? ' / ' : '') . $person)) ?: '-' ?></td>
         <td><?php if ($d['status'] === 'won'): ?><span class="tag ok">won</span><?php else: ?><span class="tag bad">lost</span><?php if ($d['lost_reason'] !== ''): ?> <span class="muted small"><?= h($d['lost_reason']) ?></span><?php endif; ?><?php endif; ?></td>
-        <td class="muted small"><?= (int) $d['closed_at'] ? h(date('j M Y', (int) $d['closed_at'])) : '-' ?></td>
+        <td class="muted small hide-sm"><?= (int) $d['closed_at'] ? h(date('j M Y', (int) $d['closed_at'])) : '-' ?></td>
         <td style="text-align:right"><b><?= money((int) $d['value_cents']) ?></b></td>
         <td style="text-align:right"><form method="post" style="display:inline"><?= csrf_field() ?><input type="hidden" name="do" value="deal_status"><input type="hidden" name="id" value="<?= (int) $d['id'] ?>"><input type="hidden" name="status" value="open"><button class="btn ghost sm" style="padding:2px 9px;font-size:.72rem">Reopen</button></form></td></tr>
   <?php endforeach; ?>

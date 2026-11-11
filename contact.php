@@ -50,7 +50,7 @@ head(contact_name($c), 'contacts', $u);
 <h1 style="font-size:1.5rem;margin-bottom:2px"><?= h(contact_name($c)) ?></h1>
 <p class="muted" style="margin-bottom:16px"><?php if ((int) $c['company_id']): ?><a href="<?= h(url('company.php?id=' . (int) $c['company_id'])) ?>"><?= h($c['company']) ?></a><?php else: ?><?= h($c['company']) ?><?php endif; ?><?php foreach (jdec($c['tags']) as $tg): ?> <span class="tag"><?= h($tg) ?></span><?php endforeach; ?><?php if ((int) $c['dnd_email'] === 1): ?> <span class="tag bad">unsubscribed</span><?php endif; ?></p>
 
-<div class="grid2">
+<div class="grid2 stack">
  <div>
   <div class="card"><h2>Details</h2>
     <table class="tbl">

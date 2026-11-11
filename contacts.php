@@ -118,13 +118,13 @@ head('Contacts', 'contacts', $u);
   <?php if (!$rows): ?>
     <div class="empty"><div class="big">&#128100;</div>No contacts yet. <a href="<?= h(url('contacts.php?new=1')) ?>">Add one</a> or import a CSV.</div>
   <?php else: ?>
-  <div class="scrollx"><table class="tbl"><thead><tr><th>Name</th><th>Email</th><th>Phone</th><th>Company</th><th>Tags</th><th>Added</th></tr></thead><tbody>
+  <div class="scrollx"><table class="tbl"><thead><tr><th>Name</th><th>Email</th><th class="hide-sm">Phone</th><th>Company</th><th>Tags</th><th class="hide-sm">Added</th></tr></thead><tbody>
     <?php foreach ($rows as $c): ?>
     <tr><td><a href="<?= h(url('contact.php?id=' . (int) $c['id'])) ?>"><b><?= h(contact_name($c)) ?></b></a></td>
-        <td class="muted"><?= h($c['email']) ?></td><td class="muted"><?= h($c['phone']) ?></td>
+        <td class="muted"><?= h($c['email']) ?></td><td class="muted hide-sm"><?= h($c['phone']) ?></td>
         <td class="muted"><?php if ((int) $c['company_id']): ?><a href="<?= h(url('company.php?id=' . (int) $c['company_id'])) ?>"><?= h($c['company']) ?></a><?php else: ?><?= h($c['company']) ?><?php endif; ?></td>
         <td><?php foreach (jdec($c['tags']) as $tg): ?><span class="tag"><?= h($tg) ?></span> <?php endforeach; ?></td>
-        <td class="muted small"><?= h(date('j M Y', (int) $c['created_at'])) ?></td></tr>
+        <td class="muted small hide-sm"><?= h(date('j M Y', (int) $c['created_at'])) ?></td></tr>
     <?php endforeach; ?>
   </tbody></table></div>
   <?php endif; ?>

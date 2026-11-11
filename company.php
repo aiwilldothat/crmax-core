@@ -86,7 +86,7 @@ head($co['name'], 'companies', $u);
 </div>
 <?php endif; ?>
 
-<div class="grid2">
+<div class="grid2 stack">
  <div>
   <div class="card"><h2>Details</h2>
     <table class="tbl">

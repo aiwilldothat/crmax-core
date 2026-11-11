@@ -101,6 +101,9 @@ function base_css(): string {
    .main{padding:14px 14px 60px}.grid2,.grid3,.grid4{grid-template-columns:1fr 1fr}
    .shellbg{display:none;position:fixed;inset:0;background:rgba(20,35,30,.35);z-index:45}.shellbg.open{display:block}
  }
+ .grid2>*,.grid3>*,.grid4>*{min-width:0}
+ @media (max-width:900px){ .grid2.stack{grid-template-columns:1fr} }
+ @media (max-width:700px){ .hide-sm{display:none} }
  @media (max-width:560px){ .grid2,.grid3,.grid4{grid-template-columns:1fr} }
  button:focus-visible,a:focus-visible,input:focus-visible{outline:2px solid var(--brand2);outline-offset:2px}
 CSS;
