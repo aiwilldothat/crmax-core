@@ -4,17 +4,20 @@
  *   Authorization: Bearer <token>
  * Routes (prefix with this file, e.g. /api.php/contacts):
  *   GET  /me                          org, version and counts
- *   GET  /contacts?q=&limit=          list contacts
+ *   GET  /contacts?q=&owner_id=&limit=   list contacts (owner_id=0 lists the unassigned ones)
  *   GET  /contacts/{id}               one contact
- *   POST /contacts                    create/update (de-duped by email); JSON or form body
+ *   POST /contacts                    create/update (de-duped by email); JSON or form body. owner_id sets the owner;
+ *                                     without it a new contact follows the lead routing rule in Settings
  *   GET  /companies?q=&limit=         list companies
  *   GET  /companies/{id}              one company
  *   POST /companies                   create/update (matched by name)
- *   GET  /deals?status=&limit=        list deals: status = open (default) | won | lost | all
+ *   GET  /deals?status=&owner_id=&limit= list deals: status = open (default) | won | lost | all
  *   GET  /deals/{id}                  one deal
  *   POST /deals                       create a deal
  *   POST /deals/{id}                  update a deal - only the fields you send change (PUT and PATCH also work)
  *   GET  /pipelines                   pipelines with their stages and each stage's win probability
+ *   GET  /users, /users/{id}          team members - id, name and role only - to make sense of owner_id
+ * A write that gives a contact or a deal to someone emails that person; send "notify": false to skip the email.
  */
 declare(strict_types=1);
 require_once __DIR__ . '/lib.php';
@@ -41,11 +44,19 @@ if ($write) {
     if (!is_array($body)) $body = [];
 }
 $limit = min(500, max(1, (int) ($_GET['limit'] ?? 100)));
+// ?owner_id= narrows a list to one owner (0 = unassigned). Left out, the list is not filtered by owner.
+$ownerFilter = null;
+if (isset($_GET['owner_id']) && $_GET['owner_id'] !== '') {
+    if (!is_string($_GET['owner_id']) || !ctype_digit($_GET['owner_id']) || strlen($_GET['owner_id']) > 9) out(['error' => 'owner_id must be a user id, or 0 for unassigned'], 422);
+    $ownerFilter = (int) $_GET['owner_id'];
+}
+// A write that gives something to a team member emails them, unless the body says "notify": false.
+$notify = !array_key_exists('notify', $body) || filter_var($body['notify'], FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE) !== false;
 
 function contact_out(array $c): array {
     return ['id' => (int) $c['id'], 'first_name' => $c['first_name'], 'last_name' => $c['last_name'], 'email' => $c['email'],
         'phone' => $c['phone'], 'company' => $c['company'], 'company_id' => (int) $c['company_id'], 'address' => $c['address'], 'tags' => jdec($c['tags']),
-        'source' => $c['source'], 'unsubscribed' => (bool) $c['dnd_email'], 'created_at' => (int) $c['created_at']];
+        'source' => $c['source'], 'unsubscribed' => (bool) $c['dnd_email'], 'created_at' => (int) $c['created_at'], 'owner_id' => (int) $c['owner_id']];
 }
 function company_out(array $c): array {
     return ['id' => (int) $c['id'], 'name' => $c['name'], 'domain' => $c['domain'], 'website' => $c['website'], 'phone' => $c['phone'],
@@ -82,13 +93,24 @@ if ($res === 'contacts') {
             'phone' => $body['phone'] ?? '', 'company' => $body['company'] ?? '', 'address' => $body['address'] ?? '',
         ];
         if (isset($body['tags'])) $in['tags'] = (array) $body['tags'];   // no "tags" in the body: the contact keeps its tags
-        $id = contact_upsert($in, (string) ($body['source'] ?? 'api'));
+        // owner_id: a team member's id, or 0 for nobody. Left out, a new contact follows the lead routing
+        // rule in Settings and a contact that already exists keeps its owner.
+        if (array_key_exists('owner_id', $body) && $body['owner_id'] !== null && $body['owner_id'] !== '') {
+            $ow = $body['owner_id'];
+            if (!(is_int($ow) && $ow >= 0) && !(is_string($ow) && ctype_digit($ow) && strlen($ow) < 10)) out(['error' => 'owner_id must be a user id, or 0 for unassigned'], 422);
+            if ((int) $ow && !user_by_id((int) $ow)) out(['error' => 'unknown owner_id'], 422);
+            $in['owner_id'] = (int) $ow;
+        }
+        $id = contact_upsert($in, (string) ($body['source'] ?? 'api'), ['notify' => $notify, 'via' => 'the API']);
         out(['ok' => true, 'contact' => contact_out(go_get('contacts', $id))], 201);
     }
     if ($rid) { $c = go_get('contacts', $rid); if (!$c) out(['error' => 'not found'], 404); out(contact_out($c)); }
     $q = trim((string) ($_GET['q'] ?? ''));
-    if ($q !== '') { $st = db()->prepare("SELECT * FROM contacts WHERE first_name LIKE ? OR last_name LIKE ? OR email LIKE ? OR company LIKE ? ORDER BY updated_at DESC LIMIT ?"); $lk = "%$q%"; $st->execute([$lk, $lk, $lk, $lk, $limit]); }
-    else { $st = db()->prepare("SELECT * FROM contacts ORDER BY updated_at DESC LIMIT ?"); $st->execute([$limit]); }
+    $where = []; $params = [];
+    if ($q !== '') { $where[] = "(first_name LIKE ? OR last_name LIKE ? OR email LIKE ? OR company LIKE ?)"; $lk = "%$q%"; array_push($params, $lk, $lk, $lk, $lk); }
+    if ($ownerFilter !== null) { $where[] = "owner_id=?"; $params[] = $ownerFilter; }
+    $st = db()->prepare("SELECT * FROM contacts" . ($where ? ' WHERE ' . implode(' AND ', $where) : '') . " ORDER BY updated_at DESC LIMIT ?");
+    $st->execute(array_merge($params, [$limit]));
     out(['data' => array_map('contact_out', $st->fetchAll())]);
 }
 
@@ -162,13 +184,17 @@ if ($res === 'deals') {
         }
         $d = go_get('deals', $id);
         if ((int) $d['contact_id'] && $d['status'] !== 'open' && $d['status'] !== $oldStatus) act_log((int) $d['contact_id'], 'deal_' . $d['status'], ['name' => $d['name']]);
+        if ($notify && (int) $d['owner_id'] !== (int) ($existing['owner_id'] ?? 0)) notify_assigned('deal', (int) $d['owner_id'], null, $d);   // tell the new owner
         out(['ok' => true, 'deal' => deal_out($d)], $existing ? 200 : 201);
     }
     if ($rid) { $d = go_get('deals', $rid); if (!$d) out(['error' => 'not found'], 404); out(deal_out($d)); }
     $status = (string) ($_GET['status'] ?? 'open');
     if (!in_array($status, ['open', 'won', 'lost', 'all'], true)) out(['error' => 'status must be open, won, lost or all'], 422);
-    if ($status === 'all') { $st = db()->prepare("SELECT * FROM deals ORDER BY updated_at DESC LIMIT ?"); $st->execute([$limit === 100 && !isset($_GET['limit']) ? 500 : $limit]); }
-    else { $st = db()->prepare("SELECT * FROM deals WHERE status=? ORDER BY updated_at DESC LIMIT ?"); $st->execute([$status, $limit === 100 && !isset($_GET['limit']) ? 500 : $limit]); }
+    $where = []; $params = [];
+    if ($status !== 'all') { $where[] = "status=?"; $params[] = $status; }
+    if ($ownerFilter !== null) { $where[] = "owner_id=?"; $params[] = $ownerFilter; }
+    $st = db()->prepare("SELECT * FROM deals" . ($where ? ' WHERE ' . implode(' AND ', $where) : '') . " ORDER BY updated_at DESC LIMIT ?");
+    $st->execute(array_merge($params, [$limit === 100 && !isset($_GET['limit']) ? 500 : $limit]));
     out(['data' => array_map('deal_out', $st->fetchAll())]);
 }
 
@@ -177,4 +203,12 @@ if ($res === 'pipelines') {
     out(['data' => array_map(fn($p) => ['id' => (int) $p['id'], 'name' => $p['name'], 'stages' => jdec($p['stages']), 'stage_probabilities' => stage_probs($p)], $rows)]);
 }
 
-out(['error' => 'unknown endpoint', 'see' => 'me, contacts, companies, deals, pipelines'], 404);
+if ($res === 'users') {
+    if ($write) out(['error' => 'users are read-only here; manage the team in Settings'], 405);
+    // Just enough to make sense of an owner_id: no email addresses, and nothing about how anyone signs in.
+    $userOut = fn(array $x): array => ['id' => (int) $x['id'], 'name' => (string) $x['name'], 'role' => (string) $x['role']];
+    if ($rid) { $x = user_by_id($rid); if (!$x) out(['error' => 'not found'], 404); out($userOut($x)); }
+    out(['data' => array_map($userOut, users_all())]);
+}
+
+out(['error' => 'unknown endpoint', 'see' => 'me, contacts, companies, deals, pipelines, users'], 404);
