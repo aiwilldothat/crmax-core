@@ -1,5 +1,5 @@
 <?php
-/** CRMax Core - Settings: organisation, team, email (SMTP) accounts, AI key, REST API, password. */
+/** CRMax Core - Settings: organisation, team, lead routing, email (SMTP) accounts, AI key, REST API, password. */
 declare(strict_types=1);
 require_once __DIR__ . '/lib.php';
 $u = require_login();

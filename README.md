@@ -8,15 +8,16 @@ Composer, no build step, no monthly fee. Point a web server at it and open it in
 
 ## Features
 
-- **Contacts** - searchable, taggable, CSV import/export, notes, activity timeline
+- **Contacts** - searchable, taggable, CSV import/export, notes, activity timeline; assign, tag or delete many at once from the list
 - **Companies** - a record for each organisation with its people, deals and combined activity; type a company on a contact and it is created and linked for you; merge duplicates
 - **Pipeline** - drag-and-drop deal board with custom stages; each deal has an expected close date, win probability, company, contact, owner and notes; won/lost with a reason; reopen closed deals
-- **Tasks** - a single to-do list across every contact, with due dates
+- **Tasks** - a single to-do list across every contact, with due dates and who each task is for
+- **Owners** - every contact, company and deal has an owner and every task an assignee; show Mine, Everyone, Unassigned or one person's on the contacts list, the pipeline, tasks and the dashboard; share new leads out to one person or round-robin; the new owner gets an email
 - **Forms** - build lead-capture forms, share a link or embed them, submissions become contacts
 - **Campaigns** - send email to all contacts or a tagged segment, with open tracking and one-click unsubscribe
 - **Workflows** - automate follow-ups: when a contact is created, a form is submitted or a tag is added, wait / email / tag / create a task
 - **Reports** - sales forecast (pipeline weighted by win probability, by expected close month), win rate, average deal size and days to close, contacts over time, lead sources, pipeline by stage, email performance
-- **Team** - invite colleagues, admin and member roles
+- **Team** - invite colleagues, admin and member roles; removing someone hands what they own to whoever you choose
 - **REST API** - a simple JSON API for integrations
 - **Add-ons** - add your own menu items, cards and rules without editing its files
 
@@ -69,6 +70,41 @@ Go to **Settings -> Email accounts** and add your mail provider's SMTP details (
 password). Use the **Test** button to confirm it works. Campaigns, workflow emails, and form
 notifications all send through this account. Common settings: port **587** with STARTTLS, or **465**
 with SSL. For Gmail/Google Workspace, create an **App Password**.
+
+## Owners, assignment and lead routing
+
+Every contact, company and deal has an **owner**, and every task an **assignee**. Choose them on the
+contact form and contact page, in the deal and company editors, and when adding a task; click the round
+badge on a task to pass it to someone else. The contacts list, the pipeline board, the task list and the
+dashboard each have a filter - **Everyone**, **Mine**, **Unassigned** or one person - which is remembered
+per page until you sign out.
+
+Owners organise the work; they do not restrict it. Everyone on the team can still see and edit every record.
+
+**Lead routing** (Settings -> Lead routing, admins only) decides who gets a new contact that arrives
+through a form, the API or a CSV import:
+
+- **Leave new leads unassigned** - the default, and how earlier versions behaved.
+- **Give every new lead to one person.**
+- **Share them out in turn (round-robin)** between the people you tick. Each lead takes the next turn,
+  whichever way it came in, and two leads arriving at the same moment never get the same turn.
+
+A contact someone adds by hand is theirs unless they choose another owner. A lead who is already a
+contact keeps their owner. A CSV can name the owner itself in an `owner` column (a team member's email
+address or name), and the API takes `owner_id`; both win over the rule. A task created by a workflow goes
+to the contact's owner.
+
+**Assignment emails.** When something is given to someone - a contact, company, deal or task, or a new
+lead routed to them - they get an email with a link to it, sent through your default email account.
+Nothing is sent until an email account is connected, nobody is emailed about something they assign to
+themselves, and a bulk assign or a CSV import sends one summary instead of an email per contact. Switch
+these emails off with the box under Lead routing.
+
+**Bulk actions.** Tick contacts on the list to assign them, add a tag to them or delete them in one go.
+Deleting asks first.
+
+**Removing a team member** (Settings -> Team) asks who takes over their contacts, companies, deals and
+tasks, or lets you leave them unassigned. They also come out of the lead routing rule.
 
 ## Background jobs (cron)
 
@@ -142,14 +178,20 @@ curl -X POST https://your-crm/api.php/deals/12 \
 | Endpoint | What it does |
 |---|---|
 | `GET /me` | Organisation name, app version and counts |
-| `GET /contacts`, `GET /contacts/{id}` | List (`?q=`, `?limit=`) or fetch contacts |
-| `POST /contacts` | Create or update a contact (matched by email); `company` links or creates the company; `tags` replaces the contact's tags (leave it out to keep them) |
+| `GET /contacts`, `GET /contacts/{id}` | List (`?q=`, `?owner_id=`, `?limit=`) or fetch contacts |
+| `POST /contacts` | Create or update a contact (matched by email); `company` links or creates the company; `tags` replaces the contact's tags (leave it out to keep them); `owner_id` sets the owner (`0` for nobody) - without it a new contact follows the lead routing rule and an existing one keeps its owner |
 | `GET /companies`, `GET /companies/{id}` | List (`?q=`, `?limit=`) or fetch companies |
 | `POST /companies` | Create or update a company (matched by name) |
-| `GET /deals`, `GET /deals/{id}` | List deals (`?status=open\|won\|lost\|all`, open by default) or fetch one |
+| `GET /deals`, `GET /deals/{id}` | List deals (`?status=open\|won\|lost\|all`, open by default; `?owner_id=`) or fetch one |
 | `POST /deals` | Create a deal: `name`, plus optional `value`, `stage`, `pipeline_id`, `contact_id`, `company` or `company_id`, `close_date`, `probability`, `owner_id`, `notes` |
 | `POST /deals/{id}` | Update a deal - only the fields you send change. `status` takes `open`, `won` or `lost` |
 | `GET /pipelines` | Pipelines with their stages and each stage's win probability |
+| `GET /users`, `GET /users/{id}` | The team: `id`, `name` and `role` for each person, to make sense of `owner_id`. Read-only, and no email addresses |
+
+Contacts, companies and deals carry `owner_id` (`0` = unassigned), and `?owner_id=` narrows the contact
+and deal lists to one owner (`?owner_id=0` lists the unassigned ones). A write that gives a contact or a
+deal to someone emails that person, as it does in the app; add `"notify": false` to the body to skip the
+email, for example when syncing many records.
 
 ## Add-ons
 
@@ -187,7 +229,8 @@ only ones you trust.
 | `form_elsewhere` | filter | `$url, $form` | for a form whose status is not `active`: return the http(s) address where visitors should go instead |
 
 An event's return value is ignored. Strings returned by HTML hooks are printed as they are, so escape what
-you output with `h()`. A filter receives the value first and returns it, changed or not.
+you output with `h()`. A filter receives the value first and returns it, changed or not. Deleting several
+contacts at once from the list calls `contact_deleted` once for each of them, inside that one delete.
 
 ## Upgrading
 
@@ -216,6 +259,22 @@ Upgrading from 1.1.0 to 1.1.1 changes no data. Check these things afterwards:
   accented letters. In 1.1.0 such a campaign reached nobody, and the list filter could also show similar tags.
 - New and optional: add-ons (see Add-ons), and the `currency`, `currency_symbol` and `allow_install`
   settings in `config.php`. Nothing changes unless you use them.
+
+Upgrading to 1.2 adds who created each task and a few indexes, and nothing else changes shape. What to
+know afterwards:
+
+- Earlier versions removed a team member without asking what should happen to their records, which
+  left those records owned by nobody you could see. The upgrade marks them unassigned. Find them with the
+  **Unassigned** filter and hand them to someone with the bulk **Assign** action. In the API their
+  `owner_id` now reads `0`.
+- Lead routing starts as "leave new leads unassigned", so forms, the API and CSV import behave as before
+  until you choose a rule in Settings -> Lead routing.
+- Once an email account is connected, people are emailed when a contact, company, deal or task is given
+  to them. Switch that off under Lead routing if you do not want it.
+- A task created by a workflow is now assigned to the contact's owner (it used to be unassigned).
+- The contacts CSV export has one more column at the end, `owner`.
+- API: contacts gain `owner_id`, and `GET /users` is new. Every field 1.0 and 1.1 returned is still
+  there with the same meaning.
 
 ## Backups
 

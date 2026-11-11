@@ -1,5 +1,5 @@
 <?php
-/** CRMax Core - a single contact: details, notes, tasks, activity, and a quick email. */
+/** CRMax Core - a single contact: details and owner, notes, tasks and who they are for, activity, and a quick email. */
 declare(strict_types=1);
 require_once __DIR__ . '/lib.php';
 $u = require_login();

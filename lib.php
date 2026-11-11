@@ -1,7 +1,8 @@
 <?php
 /**
  * CRMax Core - engines: outbound email over your own SMTP, optional bring-your-own AI,
- * contact de-duplication, public form handling, and the workflow + campaign processors.
+ * contact de-duplication, ownership and lead routing (who gets a new lead, and telling them),
+ * public form handling, and the workflow + campaign processors.
  */
 declare(strict_types=1);
 require_once __DIR__ . '/_boot.php';
