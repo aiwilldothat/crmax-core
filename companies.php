@@ -70,6 +70,7 @@ $st = db()->prepare("SELECT co.*,
     FROM companies co $where ORDER BY co.name COLLATE NOCASE LIMIT 500");
 $st->execute($params);
 $rows = $st->fetchAll();
+$team = team_map();
 
 head('Companies', 'companies', $u);
 ?>
@@ -95,11 +96,12 @@ head('Companies', 'companies', $u);
   <?php if (!$rows): ?>
     <div class="empty"><div class="big">&#127970;</div><?= $q !== '' ? 'No companies match that search.' : 'No companies yet. <a href="' . h(url('companies.php?new=1')) . '">Add one</a>, or type a company name on any contact and it appears here.' ?></div>
   <?php else: ?>
-  <div class="scrollx"><table class="tbl"><thead><tr><th>Company</th><th class="hide-sm">Website</th><th>Industry</th><th style="text-align:right">People</th><th style="text-align:right" class="hide-sm">Open deals</th><th style="text-align:right">Open value</th></tr></thead><tbody>
+  <div class="scrollx"><table class="tbl"><thead><tr><th>Company</th><th class="hide-sm">Website</th><th>Industry</th><th class="hide-sm">Owner</th><th style="text-align:right">People</th><th style="text-align:right" class="hide-sm">Open deals</th><th style="text-align:right">Open value</th></tr></thead><tbody>
     <?php foreach ($rows as $r): ?>
     <tr><td><a href="<?= h(url('company.php?id=' . (int) $r['id'])) ?>"><b><?= h($r['name']) ?></b></a></td>
         <td class="muted hide-sm"><?= h($r['domain'] !== '' ? $r['domain'] : $r['website']) ?></td>
         <td class="muted"><?= h($r['industry']) ?></td>
+        <td class="hide-sm"><?= who_chip((int) $r['owner_id'], $team) ?: '<span class="muted small">-</span>' ?></td>
         <td style="text-align:right"><?= (int) $r['people'] ?></td>
         <td style="text-align:right" class="hide-sm"><?= (int) $r['open_deals'] ?></td>
         <td style="text-align:right"><?= (int) $r['open_value'] ? money((int) $r['open_value']) : '<span class="muted">-</span>' ?></td></tr>

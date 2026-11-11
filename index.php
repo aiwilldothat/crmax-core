@@ -63,19 +63,29 @@ if (!$u || isset($_GET['login'])) {
 }
 
 /* -------------------------------------------------------------- dashboard -- */
-$contacts = (int) db()->query("SELECT COUNT(*) FROM contacts")->fetchColumn();
+// The numbers and both lists follow the "whose records" filter: everyone's by default, or one person's.
+$who = who_filter('dash'); $me = (int) $u['id'];
+/** Rows of $sql with the filter applied to the column $col. $sql must end in a WHERE clause; $tail (ORDER BY, LIMIT) goes after it. */
+$rowsFor = function (string $sql, string $col, array $params = [], string $tail = '') use ($who, $me): array {
+    [$test, $vals] = who_sql($col, $who, $me);
+    $st = db()->prepare($sql . ($test !== '' ? " AND $test" : '') . $tail);
+    $st->execute(array_merge($params, $vals));
+    return $st->fetchAll();
+};
+$contacts = (int) $rowsFor("SELECT COUNT(*) n FROM contacts WHERE 1=1", 'owner_id')[0]['n'];
 $newWeek  = (int) db()->query("SELECT COUNT(*) FROM contacts WHERE created_at>" . (time() - 604800))->fetchColumn();
-$openDeals = db()->query("SELECT COUNT(*) n, COALESCE(SUM(value_cents),0) v FROM deals WHERE status='open'")->fetch();
-$td = db()->prepare("SELECT COUNT(*) FROM tasks WHERE status='open' AND due_date!='' AND due_date<=?"); $td->execute([date('Y-m-d')]); $tasksDue = (int) $td->fetchColumn();
-$recent = db()->query("SELECT a.*, c.first_name, c.last_name, c.email FROM activities a LEFT JOIN contacts c ON c.id=a.contact_id ORDER BY a.id DESC LIMIT 12")->fetchAll();
-$myTasks = db()->query("SELECT t.*, c.first_name, c.last_name, c.email FROM tasks t LEFT JOIN contacts c ON c.id=t.contact_id WHERE t.status='open' ORDER BY (t.due_date='') , t.due_date LIMIT 8")->fetchAll();
+$openDeals = $rowsFor("SELECT COUNT(*) n, COALESCE(SUM(value_cents),0) v FROM deals WHERE status='open'", 'owner_id')[0];
+$tasksDue = (int) $rowsFor("SELECT COUNT(*) n FROM tasks WHERE status='open' AND due_date!='' AND due_date<=?", 'assigned_to', [date('Y-m-d')])[0]['n'];
+$recent = $rowsFor("SELECT a.*, c.first_name, c.last_name, c.email FROM activities a LEFT JOIN contacts c ON c.id=a.contact_id WHERE 1=1", 'c.owner_id', [], " ORDER BY a.id DESC LIMIT 12");
+$myTasks = $rowsFor("SELECT t.*, c.first_name, c.last_name, c.email FROM tasks t LEFT JOIN contacts c ON c.id=t.contact_id WHERE t.status='open'", 't.assigned_to', [], " ORDER BY (t.due_date='') , t.due_date LIMIT 8");
+$team = team_map();
 
 $actLabel = ['contact_created' => 'New contact', 'form_submitted' => 'Form submitted', 'workflow_email' => 'Workflow email sent', 'email_sent' => 'Email sent', 'note_added' => 'Note added', 'deal_created' => 'Deal created', 'deal_won' => 'Deal won', 'deal_lost' => 'Deal lost'];
 
 head('Dashboard', 'dash', $u);
 ?>
 <div class="pagehead"><h1>Good day, <?= h(explode(' ', $u['name'] ?: 'there')[0]) ?></h1>
-  <div class="sp"><a class="btn" href="<?= h(url('contacts.php?new=1')) ?>">+ New contact</a></div></div>
+  <div class="sp"><?= who_select($who, $u, who_onchange('index.php')) ?><a class="btn" href="<?= h(url('contacts.php?new=1')) ?>">+ New contact</a></div></div>
 
 <?php if (!email_ready()): ?>
   <div class="flash err">No email account connected yet. <a href="<?= h(url('settings.php#email')) ?>">Add your SMTP account</a> so the CRM can send campaigns and notifications.</div>
@@ -92,7 +102,8 @@ head('Dashboard', 'dash', $u);
 <div class="grid2">
   <div class="card">
     <h2>Recent activity</h2>
-    <?php if (!$recent): ?><div class="empty"><div class="big">&#128075;</div>Nothing yet. Add a contact or publish a form to get started.</div>
+    <?php if (!$recent && $who !== 'all'): ?><div class="empty">Nothing on these contacts yet. <a href="<?= h(url('index.php?who=all')) ?>">Show everyone's</a>.</div>
+    <?php elseif (!$recent): ?><div class="empty"><div class="big">&#128075;</div>Nothing yet. Add a contact or publish a form to get started.</div>
     <?php else: ?><table class="tbl"><?php foreach ($recent as $a): ?>
       <tr><td><span class="tag"><?= h($actLabel[$a['type']] ?? $a['type']) ?></span></td>
           <td><?php $cn = $a['first_name'] || $a['last_name'] || $a['email'] ? contact_name($a) : ''; ?>
@@ -105,7 +116,7 @@ head('Dashboard', 'dash', $u);
     <?php if (!$myTasks): ?><div class="empty">No open tasks. <a href="<?= h(url('tasks.php')) ?>">Add one</a>.</div>
     <?php else: ?><table class="tbl"><?php foreach ($myTasks as $t): $overdue = $t['due_date'] !== '' && $t['due_date'] < date('Y-m-d'); ?>
       <tr><td><?= h($t['title']) ?><?php if ($t['contact_id'] && ($t['first_name'] || $t['email'])): ?> <span class="muted small">&middot; <a href="<?= h(url('contact.php?id=' . (int) $t['contact_id'])) ?>"><?= h(contact_name($t)) ?></a></span><?php endif; ?></td>
-          <td style="text-align:right"><?php if ($t['due_date']): ?><span class="tag <?= $overdue ? 'bad' : '' ?>"><?= h($t['due_date']) ?></span><?php else: ?><span class="muted small">no date</span><?php endif; ?></td></tr>
+          <td style="text-align:right;white-space:nowrap"><?= who_chip((int) $t['assigned_to'], $team, 'Assigned to') ?> <?php if ($t['due_date']): ?><span class="tag <?= $overdue ? 'bad' : '' ?>"><?= h($t['due_date']) ?></span><?php else: ?><span class="muted small">no date</span><?php endif; ?></td></tr>
     <?php endforeach; ?></table><?php endif; ?>
   </div>
 </div>

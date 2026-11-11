@@ -52,10 +52,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'notes' => mb_substr(trim((string) ($_POST['notes'] ?? '')), 0, 5000),
             'updated_at' => time(),
         ];
-        if ($existing) { go_update('deals', $id, $data); flash_set('Deal updated.'); }
-        else {
-            go_insert('deals', $data + ['pipeline_id' => $pid, 'status' => 'open', 'created_at' => time()]);
+        if ($existing) {
+            go_update('deals', $id, $data);
+            if ($owner !== (int) $existing['owner_id']) notify_assigned('deal', $owner, $u, go_get('deals', $id) ?? []);   // tell the new owner
+            flash_set('Deal updated.');
+        } else {
+            $newId = go_insert('deals', $data + ['pipeline_id' => $pid, 'status' => 'open', 'created_at' => time()]);
             if ($cid) act_log($cid, 'deal_created', ['name' => $name]);
+            notify_assigned('deal', $owner, $u, go_get('deals', $newId) ?? []);
             flash_set('Deal added.');
         }
         redirect('pipelines.php?id=' . $pid);
@@ -97,8 +101,13 @@ $savedProbs = jdec($pipe['stage_probs']) ? $probs : [];
 
 $sel = "SELECT d.*, c.first_name, c.last_name, c.email, co.name company_name, us.name owner_name, us.email owner_email
         FROM deals d LEFT JOIN contacts c ON c.id=d.contact_id LEFT JOIN companies co ON co.id=d.company_id LEFT JOIN users us ON us.id=d.owner_id";
-$st = db()->prepare("$sel WHERE d.pipeline_id=? AND d.status='open' ORDER BY d.updated_at DESC"); $st->execute([$pid]); $deals = $st->fetchAll();
-$st = db()->prepare("$sel WHERE d.pipeline_id=? AND d.status!='open' ORDER BY d.closed_at DESC, d.id DESC LIMIT 20"); $st->execute([$pid]); $closed = $st->fetchAll();
+// The board and the closed list follow the "whose deals" filter: everyone's by default, or one owner's.
+$who = who_filter('pipeline');
+[$whoSql, $whoParams] = who_sql('d.owner_id', $who, (int) $u['id']);
+$and = $whoSql !== '' ? " AND $whoSql" : '';
+$whose = $who === 'me' ? 'your deals' : ($who === 'none' ? 'deals with no owner' : ($who !== 'all' ? 'deals owned by ' . user_label(user_by_id((int) $who)) : ''));
+$st = db()->prepare("$sel WHERE d.pipeline_id=? AND d.status='open'$and ORDER BY d.updated_at DESC"); $st->execute(array_merge([$pid], $whoParams)); $deals = $st->fetchAll();
+$st = db()->prepare("$sel WHERE d.pipeline_id=? AND d.status!='open'$and ORDER BY d.closed_at DESC, d.id DESC LIMIT 20"); $st->execute(array_merge([$pid], $whoParams)); $closed = $st->fetchAll();
 $focus = (int) ($_GET['deal'] ?? 0);   // deep link from a contact or company page: open this deal's editor
 $known = array_column(array_merge($deals, $closed), 'id');
 $extra = [];
@@ -131,10 +140,11 @@ head('Pipeline', 'pipelines', $u);
 <div class="pagehead"><h1>Pipeline</h1>
   <div class="sp">
     <?php if (count($pipes) > 1): ?><select onchange="location=this.value" style="width:auto" aria-label="Pipeline"><?php foreach ($pipes as $p): ?><option value="<?= h(url('pipelines.php?id=' . (int) $p['id'])) ?>" <?= (int) $p['id'] === $pid ? 'selected' : '' ?>><?= h($p['name']) ?></option><?php endforeach; ?></select><?php endif; ?>
+    <?= who_select($who, $u, who_onchange('pipelines.php?id=' . $pid)) ?>
     <button class="btn ghost sm" onclick="document.getElementById('pedit').classList.toggle('open2')">Edit stages</button>
     <button class="btn" onclick="openDeal(0)">+ New deal</button>
   </div></div>
-<p class="muted small" style="margin:-8px 0 14px"><?= count($deals) ?> open deal<?= count($deals) === 1 ? '' : 's' ?> &middot; <?= money($totalOpen) ?> &middot; weighted <b><?= money($totalWeighted) ?></b></p>
+<p class="muted small" style="margin:-8px 0 14px"><?= count($deals) ?> open deal<?= count($deals) === 1 ? '' : 's' ?> &middot; <?= money($totalOpen) ?> &middot; weighted <b><?= money($totalWeighted) ?></b><?php if ($whose !== ''): ?> &middot; showing only <?= h($whose) ?> (<a href="<?= h(url('pipelines.php?id=' . $pid . '&who=all')) ?>">show everyone's</a>)<?php endif; ?></p>
 
 <div id="pedit" class="card" style="display:none;max-width:640px">
   <h2>Pipeline stages</h2>
