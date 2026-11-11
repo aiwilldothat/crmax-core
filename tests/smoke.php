@@ -623,6 +623,11 @@ try {
     check('the contact page prints the add-on\'s panel', str_contains($r['body'], 'id="smoke-panel">Smoke panel for Pia'));
     $a->post('/contacts.php', ['do' => 'delete', 'id' => $pia]);
     check('contact_deleted runs when a contact is deleted', str_contains($alog(), "contact_deleted $pia") && (int) one($adir, "SELECT COUNT(*) FROM contacts WHERE id=?", [$pia]) === 0);
+    $pat = id_from($a->post('/contacts.php', ['do' => 'save', 'id' => 0, 'first_name' => 'Pat', 'email' => 'pat@example.test']), '/contact\.php\?id=(\d+)/');
+    $pru = id_from($a->post('/contacts.php', ['do' => 'save', 'id' => 0, 'first_name' => 'Pru', 'email' => 'pru@example.test']), '/contact\.php\?id=(\d+)/');
+    $a->post('/contacts.php', ['do' => 'bulk', 'bulk' => 'delete', 'confirm' => 'yes', 'ids' => [$pat, $pru]]);
+    check('... and once for each contact in a bulk delete', $pat > 0 && $pru > 0 && str_contains($alog(), "contact_deleted $pat") && str_contains($alog(), "contact_deleted $pru")
+        && (int) one($adir, "SELECT COUNT(*) FROM contacts WHERE id IN (?, ?)", [$pat, $pru]) === 0);
     $r = $a->get('/settings.php');
     check('Settings prints the add-on\'s cards', str_contains($r['body'], 'id="smoke-settings"'));
     $a->post('/settings.php', ['do' => 'add_user', 'uname' => 'Ben', 'email' => 'ben@example.test', 'upass' => 'smoke-pass-5', 'role' => 'member']);
