@@ -102,23 +102,23 @@ if (isset($_GET['remove']) && is_admin($u)) {
     }
     $owns = count($parts) > 1 ? implode(', ', array_slice($parts, 0, -1)) . ' and ' . end($parts) : ($parts[0] ?? '');
     $rt = lead_routing();
-    $routed = ($rt['mode'] === 'fixed' && $rt['user_id'] === (int) $t['id']) || ($rt['mode'] === 'round_robin' && in_array((int) $t['id'], $rt['user_ids'], true));
+    $getsAll = $rt['mode'] === 'fixed' && $rt['user_id'] === (int) $t['id'];                                  // every new lead goes to them
+    $takesTurns = $rt['mode'] === 'round_robin' && in_array((int) $t['id'], $rt['user_ids'], true);
     head('Remove team member', 'settings', $u);
     ?>
     <div class="pagehead"><a href="<?= h(url('settings.php#team')) ?>" class="muted">&larr; Settings</a></div>
     <div class="card" style="max-width:640px"><h2>Remove <?= h(user_label($t)) ?> from the team?</h2>
       <p class="small muted"><?= h($t['email']) ?> &middot; <?= h($t['role']) ?>. They will no longer be able to sign in.</p>
       <form method="post" action="<?= h(url('settings.php')) ?>" style="margin-top:12px"><?= csrf_field() ?><input type="hidden" name="do" value="del_user"><input type="hidden" name="id" value="<?= (int) $t['id'] ?>">
-        <?php if ($parts): ?>
-          <p>They own <?= $owns ?>.</p>
-          <label for="inherit">Who takes these over?</label>
+        <p><?= $parts ? 'They own ' . $owns . '.' : 'They do not own any contacts, companies, deals or tasks.' ?></p>
+        <?php if ($getsAll): ?><p class="small muted" style="margin-top:6px">Every new lead is routed to them at the moment. After this, new leads go to whoever takes over, or stay unassigned if nobody does.</p>
+        <?php elseif ($takesTurns): ?><p class="small muted" style="margin-top:6px">They take turns getting new leads at the moment. After this, they are taken out of the round-robin.</p><?php endif; ?>
+        <?php if ($parts || $getsAll): ?>
+          <label for="inherit"><?= $parts ? 'Who takes these over?' : 'Who gets new leads instead?' ?></label>
           <select name="inherit" id="inherit" required><option value="" selected disabled>- choose -</option>
             <?php foreach (users_all() as $m): if ((int) $m['id'] === (int) $t['id']) continue; ?><option value="<?= (int) $m['id'] ?>"><?= h(user_label($m)) ?><?= (int) $m['id'] === (int) $u['id'] ? ' (you)' : '' ?></option><?php endforeach; ?>
-            <option value="0">Nobody - leave them unassigned</option></select>
-        <?php else: ?>
-          <p>They do not own any contacts, companies, deals or tasks, so there is nothing to hand over.</p><input type="hidden" name="inherit" value="0">
-        <?php endif; ?>
-        <?php if ($routed): ?><p class="small muted" style="margin-top:10px">New leads are routed to them at the moment. <?= $rt['mode'] === 'fixed' ? 'After this, new leads go to whoever takes over, or stay unassigned if nobody does.' : 'After this, they are taken out of the round-robin.' ?></p><?php endif; ?>
+            <option value="0"><?= $parts ? 'Nobody - leave them unassigned' : 'Nobody - leave new leads unassigned' ?></option></select>
+        <?php else: ?><input type="hidden" name="inherit" value="0"><?php endif; ?>
         <div style="margin-top:16px;display:flex;gap:8px;flex-wrap:wrap"><button class="btn danger">Remove <?= h(user_label($t)) ?></button><a class="btn ghost" href="<?= h(url('settings.php#team')) ?>">Cancel</a></div>
       </form>
     </div>
