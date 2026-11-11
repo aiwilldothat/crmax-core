@@ -276,10 +276,12 @@ know afterwards:
 - API: contacts gain `owner_id`, and `GET /users` is new. Every field 1.0 and 1.1 returned is still
   there with the same meaning.
 
-Upgrading from 1.2.0 to 1.2.1 changes no data. It fixes how amounts show on Linux and macOS servers:
-1.2.0 printed `262145` in front of every amount there (`26214541,000.00` instead of `$41,000.00`),
-because PHP on those systems already defines a constant named `CURRENCY_SYMBOL`. Windows servers were
-not affected. The `currency_symbol` setting in `config.php` keeps its name.
+Upgrading from 1.2.0 to 1.2.1 changes no data. It fixes how amounts show on Linux servers: 1.2.0
+printed `262145` in front of every amount there (`26214541,000.00` instead of `$41,000.00`), because
+PHP on most Linux systems (Debian, Ubuntu, Red Hat and others built on glibc) already defines a
+constant named `CURRENCY_SYMBOL`. The amounts stored in the database were always right. Windows
+servers were not affected, and macOS, BSD and Alpine Linux should not have been, as PHP has no such
+constant there. The `currency_symbol` setting in `config.php` keeps its name.
 
 ## Backups
 

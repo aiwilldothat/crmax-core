@@ -26,7 +26,7 @@ define('DEV', (bool) ($CFG['dev'] ?? (PHP_SAPI === 'cli-server')));
 // Amounts show as "$1,234.00 USD": config.php 'currency' is the code after the amount ('' shows none) and
 // 'currency_symbol' the sign before it (e.g. 'EUR' and the euro sign).
 // New constants get a CRMAX_ prefix: PHP itself defines some generic names, and only on some systems.
-// 1.2.0 called this one CURRENCY_SYMBOL, which PHP on Linux and macOS already has (an nl_langinfo() item,
+// 1.2.0 called this one CURRENCY_SYMBOL, which PHP on Linux with glibc already has (an nl_langinfo() item,
 // 262145), so define() failed there and every amount printed as "262145" followed by the number.
 define('CURRENCY', strtoupper(trim((string) ($CFG['currency'] ?? 'USD'))));
 define('CRMAX_CURRENCY_SYMBOL', (string) ($CFG['currency_symbol'] ?? '$'));
