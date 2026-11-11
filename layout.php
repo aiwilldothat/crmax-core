@@ -18,6 +18,7 @@ function svg_icon(string $n, int $size = 19): string {
         'logout'    => '<path d="M9.5 21H6a2.5 2.5 0 0 1-2.5-2.5v-13A2.5 2.5 0 0 1 6 3h3.5"/><path d="m15.5 16 4-4-4-4M20 12H9"/>',
         'ai'        => '<path d="M12 3.5 13.7 8 18 9.7 13.7 11.4 12 16l-1.7-4.6L6 9.7 10.3 8 12 3.5z"/>',
     ];
+    $p += (array) addon_filter('icons', []);
     $d = $p[$n] ?? '<circle cx="12" cy="12" r="8"/>';
     return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" width="' . $size . '" height="' . $size . '" aria-hidden="true">' . $d . '</svg>';
 }
@@ -122,6 +123,7 @@ function head(string $title, string $active = '', ?array $u = null): void {
         'forms'     => ['forms.php', 'forms', 'Forms'],
         'reports'   => ['reports.php', 'reports', 'Reports'],
     ];
+    $nav = addon_filter('nav', $nav, $u);
     ?><!DOCTYPE html><html lang="en"><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="robots" content="noindex,nofollow">

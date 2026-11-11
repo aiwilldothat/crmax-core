@@ -7,6 +7,11 @@ $installed = user_count() > 0;
 
 /* ---------------------------------------------------------------- install -- */
 if (!$installed) {
+    if (!ALLOW_INSTALL) {   // config.php 'allow_install' => false: the first account is created from the server
+        http_response_code(503); pub_head('Not set up');
+        echo '<div class="pcard" style="text-align:center"><h1>Not set up yet</h1><p class="pmuted">This CRM has no accounts yet. It is set up from the server, not from this page.</p></div>';
+        pub_foot(); exit;
+    }
     $err = '';
     if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         post_guard();
@@ -82,6 +87,7 @@ head('Dashboard', 'dash', $u);
   <div class="kpi"><div class="n"><?= money((int) $openDeals['v']) ?></div><div class="l">Pipeline value</div></div>
   <div class="kpi"><div class="n"><?= number_format($tasksDue) ?></div><div class="l">Tasks due</div></div>
 </div>
+<?= addon_hook('dashboard', $u) ?>
 
 <div class="grid2">
   <div class="card">

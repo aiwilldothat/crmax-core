@@ -23,6 +23,13 @@ define('APP_NAME', (string) ($CFG['app_name'] ?? 'CRMax Core'));
 define('DATA_DIR', (string) ($CFG['data_dir'] ?? (__DIR__ . '/data')));
 define('DB_FILE', (string) ($CFG['db_file'] ?? (DATA_DIR . '/crm.sqlite')));
 define('DEV', (bool) ($CFG['dev'] ?? (PHP_SAPI === 'cli-server')));
+// Amounts show as "$1,234.00 USD": config.php 'currency' is the code after the amount ('' shows none) and
+// 'currency_symbol' the sign before it (e.g. 'EUR' and the euro sign).
+define('CURRENCY', strtoupper(trim((string) ($CFG['currency'] ?? 'USD'))));
+define('CURRENCY_SYMBOL', (string) ($CFG['currency_symbol'] ?? '$'));
+// config.php 'allow_install' => false: while there are no accounts, the first visitor gets "Not set up yet"
+// instead of the set-up form that makes them the admin.
+define('ALLOW_INSTALL', ($CFG['allow_install'] ?? true) !== false);
 define('SESSION_IDLE', 1209600);        // 14 days
 const LOGIN_MAX_FAILS = 6;
 const LOGIN_LOCK_SECS = 600;
@@ -268,6 +275,7 @@ function current_user(): ?array {
     $u = user_by_id((int) $_SESSION['uid']);
     if (!$u || $u['status'] !== 'active') { do_logout(); return null; }
     $_SESSION['seen'] = time();
+    addon_hook('authed', $u);
     return $u;
 }
 function do_login(string $email, string $pass): bool {
@@ -326,7 +334,8 @@ function sanitize_html(string $html): string {
     $html = preg_replace('#(href|src|action|formaction)\s*=\s*("|\')\s*javascript:[^"\']*(\2)#i', '$1=$2#$2', $html);
     return (string) $html;
 }
-function money(int $cents, string $cur = 'USD'): string { return '$' . number_format($cents / 100, 2) . ($cur !== '' ? ' ' . strtoupper($cur) : ''); }
+/** An amount for display, e.g. "$1,234.00 USD", with the sign and code from config.php. $cur overrides the code ('' = none). */
+function money(int $cents, ?string $cur = null): string { $cur ??= CURRENCY; return CURRENCY_SYMBOL . number_format($cents / 100, 2) . ($cur !== '' ? ' ' . strtoupper($cur) : ''); }
 function ago(int $ts): string {
     if ($ts <= 0) return '-'; $d = time() - $ts;
     if ($d < 60) return 'just now'; if ($d < 3600) return floor($d / 60) . 'm ago';
@@ -343,3 +352,28 @@ function act_log(int $contactId, string $type, array $meta = []): void {
 function err404(string $msg = 'That page does not exist.'): void { http_response_code(404); pub_head('Not found'); echo '<div class="pcard" style="text-align:center"><h1 style="font-size:3rem">404</h1><p class="pmuted">' . h($msg) . '</p></div>'; pub_foot(); exit; }
 
 require __DIR__ . '/layout.php';
+
+/* ---------------------------------------------------------------- add-ons -- */
+// Optional add-ons (see "Add-ons" in the README): every addons/<name>/addon.php is loaded here, after the core, on
+// every request, and registers callbacks with addon_on(). lib.php is not loaded yet at this point, so an add-on only
+// defines functions and hooks. An add-on file should start with
+//   if (!defined('APP_VERSION')) { http_response_code(404); exit; }
+// so that opening it directly over the web does nothing. Add-ons run with full access: install only ones you trust.
+// Events (side effects): authed($user), password_changed($userId), user_added($userId), contact_deleted($contactId).
+// HTML (returned strings are printed): contact_panels($contact,$user), dashboard($user), settings_cards($user),
+// campaign_editor($campaign,$segment,$user).
+// Filters (value in, value out): nav($nav,$user), icons($paths), password_problem($msg,$new,$user),
+// form_elsewhere($url,$form).
+$GLOBALS['ADDON_HOOKS'] = [];
+function addon_on(string $event, callable $fn): void { $GLOBALS['ADDON_HOOKS'][$event][] = $fn; }
+function addon_hook(string $event, ...$args): string {
+    $out = '';
+    foreach ($GLOBALS['ADDON_HOOKS'][$event] ?? [] as $fn) { $r = $fn(...$args); if (is_string($r)) $out .= $r; }
+    return $out;
+}
+function addon_filter(string $event, $value, ...$args) {
+    foreach ($GLOBALS['ADDON_HOOKS'][$event] ?? [] as $fn) $value = $fn($value, ...$args);
+    return $value;
+}
+foreach (glob(__DIR__ . '/addons/*/addon.php') ?: [] as $__addon) require_once $__addon;
+unset($__addon);

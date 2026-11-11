@@ -512,6 +512,96 @@ try {
     }
     stop($tsrv);
 
+    /* ================================== D. add-ons, currency, install lock === */
+    section('Install lock');
+    $adir = tmpdir('addons');
+    copy_app($ROOT, $adir);
+    $acfg = $adir . DS . 'config.php';
+    file_put_contents($acfg, "<?php return ['allow_install' => false];");
+    [$abase, $asrv] = serve($adir);
+    $a = new Client($abase, $adir . DS . 'jar.txt');
+    $r = $a->get('/index.php');
+    check('with allow_install off, a CRM without accounts says "Not set up yet"', $r['code'] === 503 && str_contains($r['body'], 'Not set up yet') && !str_contains($r['body'], 'Create my CRM'), 'HTTP ' . $r['code']);
+    setup_admin($a, 'ann@example.test', 'smoke-pass-4');
+    check('... and posting the set-up form creates no account', (int) one($adir, "SELECT COUNT(*) FROM users") === 0);
+    file_put_contents($acfg, "<?php return ['currency' => 'aud'];");
+    $r = setup_admin($a, 'ann@example.test', 'smoke-pass-4');
+    check('without the lock, set-up works as before', $r['code'] === 302 && (int) one($adir, "SELECT COUNT(*) FROM users") === 1, 'HTTP ' . $r['code']);
+
+    section('Currency');
+    $r = $a->get('/index.php');
+    check('config.php currency sets the code after amounts', str_contains($r['body'], '<div class="n">$0.00 AUD</div>'));
+    $euro = html_entity_decode('&euro;', ENT_QUOTES, 'UTF-8');
+    file_put_contents($acfg, "<?php return ['currency' => '', 'currency_symbol' => '$euro'];");
+    $r = $a->get('/index.php');
+    check('currency_symbol sets the sign, and an empty code shows none', str_contains($r['body'], '<div class="n">' . $euro . '0.00</div>'));
+    file_put_contents($acfg, "<?php return [];");
+
+    section('Add-ons');
+    mkdir($adir . DS . 'addons' . DS . 'smoke', 0700, true);
+    file_put_contents($adir . DS . 'addons' . DS . 'smoke' . DS . 'addon.php', <<<'PHP'
+        <?php
+        declare(strict_types=1);
+        if (!defined('APP_VERSION')) { http_response_code(404); exit; }
+        function smoke_addon_log(string $line): void { file_put_contents(DATA_DIR . '/addon.log', $line . "\n", FILE_APPEND); }
+        addon_on('authed', function (array $u): void { smoke_addon_log('authed ' . $u['email']); });
+        addon_on('user_added', function (int $id): void { smoke_addon_log("user_added $id"); });
+        addon_on('password_problem', fn(string $msg, string $new, array $u): string => $msg !== '' ? $msg : (str_contains($new, 'password') ? 'Smoke add-on: no "password" in passwords.' : ''));
+        addon_on('password_changed', function (int $id): void { smoke_addon_log("password_changed $id"); });
+        addon_on('contact_deleted', function (int $id): void { smoke_addon_log("contact_deleted $id"); });
+        addon_on('nav', function (array $nav, ?array $u): array { $nav['smoke'] = ['index.php?smoke=1', 'smoke', 'Smoke page']; return $nav; });
+        addon_on('icons', fn(array $p): array => $p + ['smoke' => '<circle cx="12" cy="12" r="3" data-smoke-icon="1"/>']);
+        addon_on('dashboard', fn(array $u): string => '<div class="card" id="smoke-dash">Smoke dashboard for ' . h($u['email']) . '</div>');
+        addon_on('contact_panels', fn(array $c, array $u): string => '<div class="card" id="smoke-panel">Smoke panel for ' . h(contact_name($c)) . '</div>');
+        addon_on('settings_cards', fn(array $u): string => '<div class="card" id="smoke-settings">Smoke settings</div>');
+        addon_on('campaign_editor', fn(array $camp, array $seg, array $u): string => '<div id="smoke-camp">Smoke audience: ' . h((string) ($seg['type'] ?? '')) . '</div>');
+        addon_on('form_elsewhere', fn(string $url, array $form): string => $form['slug'] === 'elsewhere' ? 'https://forms.example.test/contact' : $url);
+        PHP);
+    $alog = fn(): string => (string) @file_get_contents($adir . DS . 'data' . DS . 'addon.log');
+    $annId = (int) one($adir, "SELECT id FROM users WHERE email='ann@example.test'");
+    $r = $a->get('/index.php');
+    check('the dashboard prints the add-on\'s HTML', str_contains($r['body'], 'id="smoke-dash">Smoke dashboard for ann@example.test'));
+    check('the nav filter adds a menu item, with the icon from the icons filter', str_contains($r['body'], 'Smoke page') && str_contains($r['body'], 'data-smoke-icon="1"'));
+    check('authed runs on a signed-in request', str_contains($alog(), 'authed ann@example.test'));
+    $a->loadCsrf('/contacts.php?new=1');
+    $r = $a->post('/contacts.php', ['do' => 'save', 'id' => 0, 'first_name' => 'Pia', 'email' => 'pia@example.test']);
+    $pia = id_from($r, '/contact\.php\?id=(\d+)/');
+    $r = $a->get('/contact.php?id=' . $pia);
+    check('the contact page prints the add-on\'s panel', str_contains($r['body'], 'id="smoke-panel">Smoke panel for Pia'));
+    $a->post('/contacts.php', ['do' => 'delete', 'id' => $pia]);
+    check('contact_deleted runs when a contact is deleted', str_contains($alog(), "contact_deleted $pia") && (int) one($adir, "SELECT COUNT(*) FROM contacts WHERE id=?", [$pia]) === 0);
+    $r = $a->get('/settings.php');
+    check('Settings prints the add-on\'s cards', str_contains($r['body'], 'id="smoke-settings"'));
+    $a->post('/settings.php', ['do' => 'add_user', 'uname' => 'Ben', 'email' => 'ben@example.test', 'upass' => 'smoke-pass-5', 'role' => 'member']);
+    $benId = (int) one($adir, "SELECT id FROM users WHERE email='ben@example.test'");
+    check('user_added runs for a new team member', $benId > 0 && str_contains($alog(), "user_added $benId"));
+    $hash = (string) one($adir, "SELECT pass_hash FROM users WHERE id=?", [$annId]);
+    $a->post('/settings.php', ['do' => 'passwd', 'current' => 'smoke-pass-4', 'new' => 'my-password-1']);
+    $r = $a->get('/settings.php');
+    check('password_problem can refuse a new password', str_contains($r['body'], esc('Smoke add-on: no "password" in passwords.')) && one($adir, "SELECT pass_hash FROM users WHERE id=?", [$annId]) === $hash);
+    $a->post('/settings.php', ['do' => 'passwd', 'current' => 'smoke-pass-4', 'new' => 'smoke-pass-6']);
+    check('password_changed runs after a password change', one($adir, "SELECT pass_hash FROM users WHERE id=?", [$annId]) !== $hash && str_contains($alog(), "password_changed $annId"));
+    $r = $a->get('/campaigns.php?new=1');
+    check('the campaign editor prints the add-on\'s HTML', str_contains($r['body'], 'id="smoke-camp">Smoke audience: all'));
+    $form = ['do' => 'save', 'id' => 0, 'thankyou' => 'Thanks', 'redirect' => '', 'fld_label' => ['Email'], 'fld_name' => ['email'], 'fld_type' => ['email']];
+    $a->post('/forms.php', $form + ['name' => 'Elsewhere']);
+    $a->post('/forms.php', $form + ['name' => 'Hidden']);
+    $elsewhere = (int) one($adir, "SELECT id FROM forms WHERE slug='elsewhere'");
+    pdo_for($adir)->exec("UPDATE forms SET status='site' WHERE slug IN ('elsewhere', 'hidden')");   // as an add-on would
+    $r = $a->get('/f.php?s=elsewhere');
+    check('form_elsewhere sends visitors of a form that lives elsewhere there', $r['code'] === 302 && $r['location'] === 'https://forms.example.test/contact', 'HTTP ' . $r['code'] . ' ' . $r['location']);
+    $r = $a->get('/f.php?s=hidden');
+    check('a form that is not active and not claimed is not shown', $r['code'] === 404);
+    $a->post('/forms.php', ['id' => $elsewhere, 'name' => 'Elsewhere (renamed)'] + $form);
+    check('editing such a form keeps its status', one($adir, "SELECT status FROM forms WHERE id=?", [$elsewhere]) === 'site' && one($adir, "SELECT name FROM forms WHERE id=?", [$elsewhere]) === 'Elsewhere (renamed)');
+    foreach (['index.php', 'contacts.php', 'companies.php', 'pipelines.php', 'tasks.php', 'campaigns.php', 'workflows.php', 'forms.php', 'reports.php', 'settings.php'] as $p) {
+        $r = $a->get('/' . $p);
+        check("page loads without warnings with an add-on: $p", $r['code'] === 200 && !preg_match('/(Warning|Notice|Deprecated|Fatal error)<\/b>:|Uncaught /', $r['body']), 'HTTP ' . $r['code']);
+    }
+    $o = run_php($adir . DS . 'cron.php');
+    check('cron runs with an add-on installed', str_contains($o, 'workflows_processed=0'), $o);
+    stop($asrv);
+
     /* ================================================== B. upgrade from 1.0 === */
     section('Upgrade from v1.0');
     $git = trim((string) @shell_exec('git -C ' . escapeshellarg($ROOT) . ' rev-list --max-parents=0 HEAD 2>&1'));

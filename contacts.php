@@ -39,6 +39,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $id = (int) ($_POST['id'] ?? 0);
         foreach (['notes', 'tasks', 'activities', 'form_submissions', 'wf_enrollments'] as $tbl) db()->prepare("DELETE FROM $tbl WHERE contact_id=?")->execute([$id]);
         db()->prepare("UPDATE deals SET contact_id=0 WHERE contact_id=?")->execute([$id]);
+        addon_hook('contact_deleted', $id);
         go_del('contacts', $id);
         flash_set('Contact deleted.'); redirect('contacts.php');
     }

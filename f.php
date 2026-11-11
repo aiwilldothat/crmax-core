@@ -4,8 +4,10 @@ declare(strict_types=1);
 require_once __DIR__ . '/lib.php';
 
 $slug = preg_replace('/[^a-z0-9\-]/', '', strtolower((string) ($_GET['s'] ?? '')));
-$st = db()->prepare("SELECT * FROM forms WHERE slug=? AND status='active' LIMIT 1"); $st->execute([$slug]);
+$st = db()->prepare("SELECT * FROM forms WHERE slug=? LIMIT 1"); $st->execute([$slug]);
 $form = $st->fetch();
+// A form that is not active here may live somewhere else (an add-on says where): send the visitor there.
+if ($form && $form['status'] !== 'active') { $away = (string) addon_filter('form_elsewhere', '', $form); if (preg_match('#^https?://#', $away)) { header('Location: ' . $away, true, 302); exit; } $form = false; }
 if (!$form) err404('This form is not available.');
 $fields = jdec($form['fields']);
 

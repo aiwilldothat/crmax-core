@@ -13,7 +13,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $cur = (string) ($_POST['current'] ?? ''); $new = (string) ($_POST['new'] ?? '');
         if (!password_verify($cur, $u['pass_hash'])) flash_set('Current password is incorrect.', 'err');
         elseif (strlen($new) < 8) flash_set('New password must be at least 8 characters.', 'err');
-        else { db()->prepare("UPDATE users SET pass_hash=? WHERE id=?")->execute([password_hash($new, PASSWORD_DEFAULT), (int) $u['id']]); flash_set('Password changed.'); }
+        elseif (($why = (string) addon_filter('password_problem', '', $new, $u)) !== '') flash_set($why, 'err');
+        else { db()->prepare("UPDATE users SET pass_hash=? WHERE id=?")->execute([password_hash($new, PASSWORD_DEFAULT), (int) $u['id']]); addon_hook('password_changed', (int) $u['id']); flash_set('Password changed.'); }
         redirect('settings.php#account');
     }
 
@@ -32,7 +33,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $pass = (string) ($_POST['upass'] ?? ''); $role = ($_POST['role'] ?? 'member') === 'admin' ? 'admin' : 'member';
         if (!filter_var($email, FILTER_VALIDATE_EMAIL) || strlen($pass) < 8) flash_set('Enter a valid email and a password of 8+ characters.', 'err');
         elseif (user_by_email($email)) flash_set('A user with that email already exists.', 'err');
-        else { go_insert('users', ['email' => $email, 'pass_hash' => password_hash($pass, PASSWORD_DEFAULT), 'name' => $name, 'role' => $role, 'status' => 'active', 'created_at' => time()]); flash_set('Team member added.'); }
+        else { $nid = go_insert('users', ['email' => $email, 'pass_hash' => password_hash($pass, PASSWORD_DEFAULT), 'name' => $name, 'role' => $role, 'status' => 'active', 'created_at' => time()]); addon_hook('user_added', $nid); flash_set('Team member added.'); }
         redirect('settings.php#team');
     }
     if ($do === 'del_user') {
@@ -157,6 +158,7 @@ head('Settings', 'settings', $u);
   <div style="margin-top:10px"><form method="post" onsubmit="return confirm('Rotating the token breaks existing integrations. Continue?')"><?= csrf_field() ?><input type="hidden" name="do" value="api_reset"><button class="btn ghost sm">Regenerate token</button></form></div>
   <p class="small mono" style="margin-top:10px;color:var(--muted)">curl -H "Authorization: Bearer &lt;token&gt;" <?= h(base_url()) ?>/api.php/contacts</p>
 </div>
+<?= addon_hook('settings_cards', $u) ?>
 <?php endif; /* admin */ ?>
 
 <div class="card" id="account"><h2>Your account</h2>

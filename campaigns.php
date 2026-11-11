@@ -56,6 +56,7 @@ if (isset($_GET['new']) || $edit) {
     <div class="pagehead"><a href="<?= h(url('campaigns.php')) ?>" class="muted">&larr; Campaigns</a>
       <div class="sp"><span class="tag <?= $c['status'] === 'sent' ? 'ok' : ($c['status'] === 'sending' ? 'warn' : '') ?>"><?= h($c['status']) ?></span></div></div>
     <?php if (!email_ready()): ?><div class="flash err">No email account connected. <a href="<?= h(url('settings.php#email')) ?>">Add one</a> to send campaigns.</div><?php endif; ?>
+    <?= addon_hook('campaign_editor', $c, $seg, $u) ?>
     <div class="grid2"><div>
       <div class="card"><form method="post"><?= csrf_field() ?><input type="hidden" name="do" value="save"><input type="hidden" name="id" value="<?= (int) ($edit['id'] ?? 0) ?>">
         <label>Campaign name</label><input name="name" value="<?= h($c['name']) ?>" required <?= $editable ? '' : 'disabled' ?>>

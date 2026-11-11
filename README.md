@@ -18,6 +18,7 @@ Composer, no build step, no monthly fee. Point a web server at it and open it in
 - **Reports** - sales forecast (pipeline weighted by win probability, by expected close month), win rate, average deal size and days to close, contacts over time, lead sources, pipeline by stage, email performance
 - **Team** - invite colleagues, admin and member roles
 - **REST API** - a simple JSON API for integrations
+- **Add-ons** - add your own menu items, cards and rules without editing its files
 
 **Your data, your email, your choice of AI.** Email is sent through *your own* SMTP account - nothing is
 routed through a third party. AI drafting is optional and uses *your own* API key; none is bundled.
@@ -35,6 +36,10 @@ routed through a third party. AI drafting is optional and uses *your own* API ke
 4. Open it in your browser. The first visit shows a short setup form - **the first account you create is the admin.**
 
 That's it. The SQLite database installs itself on first run.
+
+> Until that first account exists, whoever opens the CRM first can create it. To rule that out on a public
+> server, put `'allow_install' => false` in `config.php` before you upload: visitors then see "Not set up yet".
+> Remove the line (or set it to `true`) just while you create your account, then put it back.
 
 ### Try it locally
 
@@ -101,6 +106,12 @@ Choose the organisation's timezone in **Settings -> Organization**; dates, due d
 To fix it for the whole server instead, set `'timezone' => 'Australia/Sydney'` in `config.php`. That
 setting wins, and the Settings field then shows it read-only.
 
+## Currency
+
+Amounts show as `$1,234.00 USD`. In `config.php`, `'currency' => 'AUD'` changes the code after the amount
+(`''` shows none) and `'currency_symbol'` the sign before it, for example `'currency' => 'GBP'` with
+`'currency_symbol'` set to the pound sign.
+
 ## AI (optional, bring your own key)
 
 In **Settings -> AI**, paste your own Anthropic API key to enable AI email drafting. No key is included
@@ -140,6 +151,44 @@ curl -X POST https://your-crm/api.php/deals/12 \
 | `POST /deals/{id}` | Update a deal - only the fields you send change. `status` takes `open`, `won` or `lost` |
 | `GET /pipelines` | Pipelines with their stages and each stage's win probability |
 
+## Add-ons
+
+An add-on extends CRMax Core without changing its files, so upgrading stays a plain file replace. Put it
+in `addons/<name>/addon.php`. Every `addon.php` there is loaded on each request, after the core, and
+registers callbacks with `addon_on()`:
+
+```php
+<?php
+declare(strict_types=1);
+if (!defined('APP_VERSION')) { http_response_code(404); exit; }   // opened directly: do nothing
+
+// A card on every contact page.
+addon_on('contact_panels', fn(array $contact, array $user): string =>
+    '<div class="card"><h2>Hello</h2><p>' . h(contact_name($contact)) . '</p></div>');
+```
+
+`addon.php` is loaded before `lib.php`, so at that point it should only define functions and register
+callbacks; do the work inside them. Add-ons run with the app's full access to the database, so install
+only ones you trust.
+
+| Hook | Kind | Called with | When |
+|---|---|---|---|
+| `authed` | event | `$user` | every signed-in request |
+| `user_added` | event | `$userId` | a team member is added in Settings |
+| `password_changed` | event | `$userId` | someone changes their password |
+| `contact_deleted` | event | `$contactId` | a contact is deleted (just before its record goes) |
+| `dashboard` | HTML | `$user` | under the dashboard counters |
+| `contact_panels` | HTML | `$contact, $user` | on a contact's page, after the details |
+| `settings_cards` | HTML | `$user` | for admins, after the other Settings cards |
+| `campaign_editor` | HTML | `$campaign, $segment, $user` | at the top of the campaign editor |
+| `nav` | filter | `$nav, $user` | the sidebar: `key => [file, icon name, label]` |
+| `icons` | filter | `$paths` | extra sidebar icons: `icon name => SVG path markup` (24 x 24, stroked) |
+| `password_problem` | filter | `$message, $newPassword, $user` | return a reason to refuse a new password, or `''` |
+| `form_elsewhere` | filter | `$url, $form` | for a form whose status is not `active`: return the http(s) address where visitors should go instead |
+
+An event's return value is ignored. Strings returned by HTML hooks are printed as they are, so escape what
+you output with `h()`. A filter receives the value first and returns it, changed or not.
+
 ## Upgrading
 
 Replace the application files with the new version and keep your `data/` folder. The database upgrades
@@ -161,6 +210,8 @@ Upgrading from 1.1.0 to 1.1.1 changes no data. Check these things afterwards:
   tag step. Look over any active ones before you upgrade, because they start enrolling contacts.
 - Updating a contact through the API without a `tags` field, or importing a CSV without a tags column,
   no longer clears the contact's tags.
+- New and optional: add-ons (see Add-ons), and the `currency`, `currency_symbol` and `allow_install`
+  settings in `config.php`. Nothing changes unless you use them.
 
 ## Backups
 

@@ -20,7 +20,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $slug = $id && ($ex = go_get('forms', $id)) ? $ex['slug'] : '';
         if ($slug === '') { $slug = slugify((string) ($_POST['name'] ?? 'form')); while (db()->query("SELECT 1 FROM forms WHERE slug=" . db()->quote($slug))->fetchColumn()) $slug .= bin2hex(random_bytes(1)); }
         $data = ['name' => trim((string) ($_POST['name'] ?? 'Form')) ?: 'Form', 'slug' => $slug, 'fields' => json_encode($fields, JSON_UNESCAPED_SLASHES),
-            'thankyou' => trim((string) ($_POST['thankyou'] ?? '')), 'notify' => isset($_POST['notify']) ? 1 : 0, 'redirect' => trim((string) ($_POST['redirect'] ?? '')), 'status' => 'active'];
+            'thankyou' => trim((string) ($_POST['thankyou'] ?? '')), 'notify' => isset($_POST['notify']) ? 1 : 0, 'redirect' => trim((string) ($_POST['redirect'] ?? '')), 'status' => (isset($ex) && is_array($ex) && $ex['status'] !== 'active') ? $ex['status'] : 'active'];
         if ($id && go_get('forms', $id)) go_update('forms', $id, $data);
         else { $data['created_at'] = time(); $id = go_insert('forms', $data); }
         flash_set('Form saved.'); redirect('forms.php?edit=' . $id);

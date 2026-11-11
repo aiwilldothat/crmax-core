@@ -61,6 +61,7 @@ head(contact_name($c), 'contacts', $u);
       <tr><td class="muted">Added</td><td><?= h(date('j M Y', (int) $c['created_at'])) ?></td></tr>
     </table>
   </div>
+  <?= addon_hook('contact_panels', $c, $u) ?>
   <?php if ($c['email']): ?>
   <div class="card"><h2>Send an email</h2>
     <form method="post"><?= csrf_field() ?><input type="hidden" name="do" value="email">
