@@ -14,7 +14,7 @@ Composer, no build step, no monthly fee. Point a web server at it and open it in
 - **Tasks** - a single to-do list across every contact, with due dates
 - **Forms** - build lead-capture forms, share a link or embed them, submissions become contacts
 - **Campaigns** - send email to all contacts or a tagged segment, with open tracking and one-click unsubscribe
-- **Workflows** - automate follow-ups: when a contact is created or a form is submitted, wait / email / tag / create a task
+- **Workflows** - automate follow-ups: when a contact is created, a form is submitted or a tag is added, wait / email / tag / create a task
 - **Reports** - sales forecast (pipeline weighted by win probability, by expected close month), win rate, average deal size and days to close, contacts over time, lead sources, pipeline by stage, email performance
 - **Team** - invite colleagues, admin and member roles
 - **REST API** - a simple JSON API for integrations
@@ -132,7 +132,7 @@ curl -X POST https://your-crm/api.php/deals/12 \
 |---|---|
 | `GET /me` | Organisation name, app version and counts |
 | `GET /contacts`, `GET /contacts/{id}` | List (`?q=`, `?limit=`) or fetch contacts |
-| `POST /contacts` | Create or update a contact (matched by email); `company` links or creates the company |
+| `POST /contacts` | Create or update a contact (matched by email); `company` links or creates the company; `tags` replaces the contact's tags (leave it out to keep them) |
 | `GET /companies`, `GET /companies/{id}` | List (`?q=`, `?limit=`) or fetch companies |
 | `POST /companies` | Create or update a company (matched by name) |
 | `GET /deals`, `GET /deals/{id}` | List deals (`?status=open\|won\|lost\|all`, open by default) or fetch one |
@@ -149,13 +149,18 @@ have is changed or removed. Copy `data/crm.sqlite` somewhere safe first, as you 
 Upgrading from 1.0 to 1.1 turns every company name already typed on a contact into a company record
 and links the contacts to it.
 
-Upgrading from 1.1.0 to 1.1.1 changes no data. Check three things afterwards:
+Upgrading from 1.1.0 to 1.1.1 changes no data. Check these things afterwards:
 
 - If cron.php runs from the command line, add `base_url` to `config.php` (see Background jobs). Without
   it, email sent by cron had unsubscribe links pointing at `localhost`, and those links did not work.
 - Workflow emails now carry an unsubscribe link and a `List-Unsubscribe` header, like campaigns.
 - The timezone chosen in Settings now takes effect (in 1.1.0 only the `config.php` value did). Check that
   Settings -> Organization shows the timezone you want.
+- Workflows that start when "A tag is added" now run. In 1.1.0 they never started. A contact now enters
+  them whenever it gains the tag: added by hand, by CSV import, through the API, or by another workflow's
+  tag step. Look over any active ones before you upgrade, because they start enrolling contacts.
+- Updating a contact through the API without a `tags` field, or importing a CSV without a tags column,
+  no longer clears the contact's tags.
 
 ## Backups
 

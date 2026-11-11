@@ -141,7 +141,8 @@ final class Client {
         $ch = curl_init($this->base . $path);
         curl_setopt_array($ch, [CURLOPT_CUSTOMREQUEST => $method, CURLOPT_RETURNTRANSFER => true, CURLOPT_HEADER => true, CURLOPT_FOLLOWLOCATION => false,
             CURLOPT_COOKIEJAR => $this->jar, CURLOPT_COOKIEFILE => $this->jar, CURLOPT_TIMEOUT => 30, CURLOPT_HTTPHEADER => $headers]);
-        if ($body !== null) curl_setopt($ch, CURLOPT_POSTFIELDS, is_array($body) ? http_build_query($body) : $body);
+        if (is_array($body) && isset($body['__multipart'])) { unset($body['__multipart']); curl_setopt($ch, CURLOPT_POSTFIELDS, $body); }
+        elseif ($body !== null) curl_setopt($ch, CURLOPT_POSTFIELDS, is_array($body) ? http_build_query($body) : $body);
         $raw = (string) curl_exec($ch);
         $code = (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
         $hs = (int) curl_getinfo($ch, CURLINFO_HEADER_SIZE);
@@ -149,6 +150,11 @@ final class Client {
         return ['code' => $code, 'body' => substr($raw, $hs), 'location' => preg_match('/^Location:\s*(\S+)/mi', substr($raw, 0, $hs), $m) ? $m[1] : ''];
     }
     public function get(string $path): array { return $this->req('GET', $path); }
+    /** POST a form with one file (multipart), like a browser upload. */
+    public function upload(string $path, array $fields, string $field, string $file): array {
+        $fields['csrf'] = $this->csrf; $fields[$field] = new CURLFile($file, 'text/csv', basename($file));
+        return $this->req('POST', $path, $fields + ['__multipart' => true]);
+    }
     public function post(string $path, array $fields, bool $withCsrf = true): array { if ($withCsrf) $fields['csrf'] = $this->csrf; return $this->req('POST', $path, $fields); }
     public function loadCsrf(string $path): bool { $r = $this->get($path); if (preg_match('/name="csrf" value="([a-f0-9]+)"/', $r['body'], $m)) { $this->csrf = $m[1]; return true; } return false; }
     public function api(string $method, string $path, string $token, ?array $json = null): array {
@@ -173,6 +179,24 @@ function setup_admin(Client $c, string $email, string $pass): array {
     $c->loadCsrf('/index.php');
     return $c->post('/index.php', ['name' => 'Ada Admin', 'org' => 'Smoke Org', 'email' => $email, 'password' => $pass]);
 }
+/**
+ * Create a workflow through the editor and switch it on. Returns its id.
+ * $steps: [['tag', 'vip'], ['task', 'Call {{first_name}}']] - tag and task steps only.
+ */
+function make_workflow(Client $c, string $dir, string $name, string $trigger, string $tag, array $steps): int {
+    $f = ['do' => 'save', 'id' => 0, 'name' => $name, 'trigger_on' => $trigger, 'cfg_tag' => $tag, 's_type' => [], 's_tag' => [], 's_title' => [], 's_due' => []];
+    foreach ($steps as $i => [$type, $value]) {
+        $f['s_type'][$i] = $type; $f['s_tag'][$i] = $type === 'tag' ? $value : ''; $f['s_title'][$i] = $type === 'task' ? $value : ''; $f['s_due'][$i] = 0;
+    }
+    $c->post('/workflows.php', $f);
+    $id = (int) one($dir, "SELECT id FROM workflows WHERE name=? ORDER BY id DESC LIMIT 1", [$name]);
+    $c->post('/workflows.php', ['do' => 'toggle', 'id' => $id]);
+    return $id;
+}
+function enrolled(string $dir, int $workflowId, string $status = ''): int {
+    return (int) one($dir, "SELECT COUNT(*) FROM wf_enrollments WHERE workflow_id=?" . ($status !== '' ? " AND status='$status'" : ''), [$workflowId]);
+}
+function tags_of(string $dir, string $email): array { return json_decode((string) one($dir, "SELECT tags FROM contacts WHERE email=?", [$email]), true) ?: []; }
 
 try {
     /* ====================================================== A. fresh install === */
@@ -425,6 +449,68 @@ try {
     $m = mail_to($mail, 'r3@example.test');
     check('a Reply-To that would add a header of its own is left out', $m !== [] && !isset($m['headers']['reply-to']) && !isset($m['headers']['bcc']));
     stop($srv);
+
+    /* ============================================ C. tag-added workflows === */
+    section('Workflows triggered by a tag');
+    $tdir = tmpdir('tags');
+    copy_app($ROOT, $tdir);
+    [$tbase, $tsrv] = serve($tdir);
+    $t = new Client($tbase, $tdir . DS . 'jar.txt');
+    setup_admin($t, 'tess@example.test', 'smoke-pass-3');
+    $t->loadCsrf('/workflows.php?new=1');
+    $vip = make_workflow($t, $tdir, 'VIP follow-up', 'tag_added', 'vip', [['task', 'VIP call {{first_name}}']]);
+    check('a workflow on "A tag is added" is saved and switched on', $vip > 0 && one($tdir, "SELECT status FROM workflows WHERE id=?", [$vip]) === 'active');
+    $t->post('/contacts.php', ['do' => 'save', 'id' => 0, 'first_name' => 'Ula', 'email' => 'ula@example.test', 'tags' => 'vip']);
+    check('a contact created with the tag enters the workflow', enrolled($tdir, $vip) === 1);
+    $r = $t->post('/contacts.php', ['do' => 'save', 'id' => 0, 'first_name' => 'Vik', 'email' => 'vik@example.test', 'tags' => 'lead']);
+    $vik = id_from($r, '/contact\.php\?id=(\d+)/');
+    check('a contact with a different tag does not', $vik > 0 && enrolled($tdir, $vip) === 1);
+    $t->post('/contacts.php', ['do' => 'save', 'id' => $vik, 'first_name' => 'Vik', 'email' => 'vik@example.test', 'tags' => 'lead, vip']);
+    check('adding the tag to an existing contact enrols it', enrolled($tdir, $vip) === 2);
+    $t->post('/contacts.php', ['do' => 'save', 'id' => $vik, 'first_name' => 'Vik', 'email' => 'vik@example.test', 'tags' => 'vip, lead']);
+    check('saving a contact that already has the tag does not enrol it again', enrolled($tdir, $vip) === 2);
+    $o = run_php($tdir . DS . 'cron.php');
+    check('cron runs the tag workflow for both', (int) one($tdir, "SELECT COUNT(*) FROM tasks WHERE title IN ('VIP call Ula', 'VIP call Vik')") === 2 && enrolled($tdir, $vip, 'done') === 2, $o);
+
+    $t->get('/settings.php');
+    $ttok = (string) one($tdir, "SELECT v FROM settings WHERE k='api_token'");
+    $t->api('POST', 'contacts', $ttok, ['first_name' => 'Wes', 'email' => 'wes@example.test', 'tags' => ['lead']]);
+    $r = $t->api('POST', 'contacts', $ttok, ['email' => 'wes@example.test', 'phone' => '0400 000 000']);
+    check('an API update without "tags" keeps the contact\'s tags', $r['code'] === 201 && tags_of($tdir, 'wes@example.test') === ['lead'], json_encode(tags_of($tdir, 'wes@example.test')));
+    $t->api('POST', 'contacts', $ttok, ['email' => 'wes@example.test', 'tags' => ['lead', 'vip']]);
+    check('a tag added through the API enrols the contact', enrolled($tdir, $vip) === 3);
+
+    file_put_contents($tdir . DS . 'with-tags.csv', "email,first_name,tags\nxia@example.test,Xia,\"vip, lead\"\n");
+    $t->upload('/contacts.php', ['do' => 'import'], 'csv', $tdir . DS . 'with-tags.csv');
+    check('a contact imported with the tag enters the workflow', tags_of($tdir, 'xia@example.test') === ['vip', 'lead'] && enrolled($tdir, $vip) === 4);
+    file_put_contents($tdir . DS . 'no-tags.csv', "email,phone\nvik@example.test,0411 111 111\n");
+    $t->upload('/contacts.php', ['do' => 'import'], 'csv', $tdir . DS . 'no-tags.csv');
+    check('importing a file without a tags column keeps the contact\'s tags', one($tdir, "SELECT phone FROM contacts WHERE email='vik@example.test'") === '0411 111 111' && tags_of($tdir, 'vik@example.test') === ['vip', 'lead'] && enrolled($tdir, $vip) === 4);
+
+    $tagger = make_workflow($t, $tdir, 'Tag new contacts', 'contact_created', '', [['tag', 'vip']]);
+    $t->post('/contacts.php', ['do' => 'save', 'id' => 0, 'first_name' => 'Yan', 'email' => 'yan@example.test', 'tags' => '']);
+    run_php($tdir . DS . 'cron.php');
+    check("a workflow's tag step starts the workflow on that tag", tags_of($tdir, 'yan@example.test') === ['vip'] && enrolled($tdir, $vip) === 5);
+    $o = run_php($tdir . DS . 'cron.php');
+    check('... which then runs on the next cron run', (int) one($tdir, "SELECT COUNT(*) FROM tasks WHERE title='VIP call Yan'") === 1, $o);
+    $t->post('/workflows.php', ['do' => 'toggle', 'id' => $tagger]);   // pause it again
+
+    $ping = make_workflow($t, $tdir, 'Ping', 'tag_added', 'ping', [['tag', 'pong']]);
+    $pong = make_workflow($t, $tdir, 'Pong', 'tag_added', 'pong', [['tag', 'ping']]);
+    $any = make_workflow($t, $tdir, 'Any tag', 'tag_added', '', [['tag', 'seen']]);
+    $t->post('/contacts.php', ['do' => 'save', 'id' => 0, 'first_name' => 'Zed', 'email' => 'zed@example.test', 'tags' => 'ping']);
+    for ($i = 0; $i < 4; $i++) run_php($tdir . DS . 'cron.php');
+    $zed = tags_of($tdir, 'zed@example.test'); sort($zed);
+    // Ping adds pong, Pong adds ping (already there), "Any tag" adds seen: each runs once (Any at most twice), then all is quiet.
+    check('workflows that add each other\'s trigger tags settle instead of looping', $zed === ['ping', 'pong', 'seen']
+        && enrolled($tdir, $ping) === 1 && enrolled($tdir, $pong) === 1 && enrolled($tdir, $any) <= 2
+        && (int) one($tdir, "SELECT COUNT(*) FROM wf_enrollments WHERE status='active'") === 0,
+        json_encode([$zed, enrolled($tdir, $ping), enrolled($tdir, $pong), enrolled($tdir, $any)]));
+    foreach (['contacts.php', 'workflows.php', 'workflows.php?edit=' . $vip] as $p) {
+        $r = $t->get('/' . $p);
+        check("page loads without warnings: $p", $r['code'] === 200 && !preg_match('/(Warning|Notice|Deprecated|Fatal error)<\/b>:|Uncaught /', $r['body']), 'HTTP ' . $r['code']);
+    }
+    stop($tsrv);
 
     /* ================================================== B. upgrade from 1.0 === */
     section('Upgrade from v1.0');

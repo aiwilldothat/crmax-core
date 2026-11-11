@@ -31,8 +31,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'updated_at' => time(),
         ];
         if ($data['email'] !== '' && !filter_var($data['email'], FILTER_VALIDATE_EMAIL)) { flash_set('Enter a valid email address.', 'err'); redirect('contacts.php' . ($id ? '?edit=' . $id : '?new=1')); }
-        if ($id && go_get('contacts', $id)) { go_update('contacts', $id, $data); contact_set_company($id, $data['company']); flash_set('Contact updated.'); }
-        else { $data['created_at'] = time(); $data['owner_id'] = (int) $u['id']; $id = go_insert('contacts', $data); contact_set_company($id, $data['company']); act_log($id, 'contact_created', ['source' => 'manual']); wf_fire('contact_created', $id); flash_set('Contact added.'); }
+        if ($id && ($old = go_get('contacts', $id))) { go_update('contacts', $id, $data); contact_set_company($id, $data['company']); wf_fire_tags_added($id, jdec($old['tags']), jdec($data['tags'])); flash_set('Contact updated.'); }
+        else { $data['created_at'] = time(); $data['owner_id'] = (int) $u['id']; $id = go_insert('contacts', $data); contact_set_company($id, $data['company']); act_log($id, 'contact_created', ['source' => 'manual']); wf_fire('contact_created', $id); wf_fire_tags_added($id, [], jdec($data['tags'])); flash_set('Contact added.'); }
         redirect('contact.php?id=' . $id);
     }
     if ($do === 'delete') {
@@ -47,12 +47,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         while (($row = fgetcsv($fh)) !== false) {
             if ($head === null) { $head = array_map(fn($h) => strtolower(trim((string) $h)), $row); continue; }
             $r = @array_combine($head, array_pad($row, count($head), '')); if (!$r) continue;
-            $tags = isset($r['tags']) ? array_map('trim', explode(',', (string) $r['tags'])) : [];
-            contact_upsert([
+            $in = [
                 'first_name' => $r['first_name'] ?? ($r['first name'] ?? ''), 'last_name' => $r['last_name'] ?? ($r['last name'] ?? ''),
                 'email' => $r['email'] ?? '', 'phone' => $r['phone'] ?? '', 'company' => $r['company'] ?? '',
-                'address' => $r['address'] ?? ($r['street'] ?? ''), 'tags' => $tags,
-            ], 'import');
+                'address' => $r['address'] ?? ($r['street'] ?? ''),
+            ];
+            // Only a file with a tags column sets tags; without one, existing contacts keep theirs.
+            if (isset($r['tags'])) $in['tags'] = array_map('trim', explode(',', (string) $r['tags']));
+            contact_upsert($in, 'import');
             $n++;
         }
         fclose($fh); flash_set("Imported $n row(s)."); redirect('contacts.php');

@@ -77,11 +77,12 @@ if ($res === 'me') {
 if ($res === 'contacts') {
     if ($write) {
         if (($body['email'] ?? '') === '' && ($body['phone'] ?? '') === '') out(['error' => 'email or phone required'], 422);
-        $id = contact_upsert([
+        $in = [
             'first_name' => $body['first_name'] ?? '', 'last_name' => $body['last_name'] ?? '', 'email' => $body['email'] ?? '',
             'phone' => $body['phone'] ?? '', 'company' => $body['company'] ?? '', 'address' => $body['address'] ?? '',
-            'tags' => isset($body['tags']) ? (array) $body['tags'] : [],
-        ], (string) ($body['source'] ?? 'api'));
+        ];
+        if (isset($body['tags'])) $in['tags'] = (array) $body['tags'];   // no "tags" in the body: the contact keeps its tags
+        $id = contact_upsert($in, (string) ($body['source'] ?? 'api'));
         out(['ok' => true, 'contact' => contact_out(go_get('contacts', $id))], 201);
     }
     if ($rid) { $c = go_get('contacts', $rid); if (!$c) out(['error' => 'not found'], 404); out(contact_out($c)); }

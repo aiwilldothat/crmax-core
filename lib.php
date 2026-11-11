@@ -125,7 +125,10 @@ function render_merge(string $text, array $c): string {
 }
 
 /* ============================================================ CONTACTS ------ */
-/** Insert or update a contact, de-duplicating on email. Fires the contact_created workflow trigger. */
+/**
+ * Insert or update a contact, de-duplicating on email. Fires the contact_created workflow trigger for a
+ * new contact, and tag_added for each tag the contact gains. Tags are replaced only when $in has 'tags'.
+ */
 function contact_upsert(array $in, string $source = ''): int {
     $email = mb_strtolower(trim((string) ($in['email'] ?? '')));
     $existing = null;
@@ -140,6 +143,7 @@ function contact_upsert(array $in, string $source = ''): int {
         $data['updated_at'] = time();
         go_update('contacts', (int) $existing['id'], $data);
         if (isset($data['company'])) contact_set_company((int) $existing['id'], $data['company']);
+        if (isset($data['tags'])) wf_fire_tags_added((int) $existing['id'], jdec($existing['tags']), jdec($data['tags']));
         return (int) $existing['id'];
     }
     if ($source !== '') $data['source'] = $source;
@@ -148,6 +152,7 @@ function contact_upsert(array $in, string $source = ''): int {
     if (isset($data['company'])) contact_set_company($id, $data['company']);
     act_log($id, 'contact_created', ['source' => $source]);
     wf_fire('contact_created', $id);
+    if (isset($data['tags'])) wf_fire_tags_added($id, [], jdec($data['tags']));
     return $id;
 }
 
@@ -325,6 +330,16 @@ function wf_fire(string $trigger, int $contactId, array $ctx = []): void {
         db()->prepare("UPDATE workflows SET enrolled_count=enrolled_count+1 WHERE id=?")->execute([(int) $wf['id']]);
     }
 }
+/**
+ * Fire the tag_added trigger once for each tag in $after that was not in $before: wherever a contact
+ * gains a tag (by hand, CSV import, the API, a workflow's tag step). Keeping or re-saving a tag fires nothing.
+ */
+function wf_fire_tags_added(int $contactId, array $before, array $after): void {
+    $before = array_map('strval', $before);
+    foreach (array_unique(array_map('strval', $after)) as $tag) {
+        if ($tag !== '' && !in_array($tag, $before, true)) wf_fire('tag_added', $contactId, ['tag' => $tag]);
+    }
+}
 /** Process due workflow enrolments (called by cron, and inline in dev). */
 function wf_run_due(int $limit = 100): int {
     $done = 0;
@@ -353,8 +368,15 @@ function wf_run_due(int $limit = 100): int {
                 act_log((int) $c['id'], 'workflow_email', ['workflow' => $wf['name'], 'subject' => $subject]);
             }
         } elseif ($type === 'tag') {
+            // A tag the contact gains here fires tag_added, so one workflow can start another. That cannot loop:
+            // a tag the contact already has fires nothing, steps only ever add tags, a contact is never in the same
+            // workflow twice at once, and new enrolments wait for the next run.
             $tags = jdec($c['tags']); $tg = trim((string) ($step['tag'] ?? ''));
-            if ($tg !== '' && !in_array($tg, $tags, true)) { $tags[] = $tg; go_update('contacts', (int) $c['id'], ['tags' => json_encode($tags, JSON_UNESCAPED_SLASHES), 'updated_at' => time()]); }
+            if ($tg !== '' && !in_array($tg, $tags, true)) {
+                $before = $tags; $tags[] = $tg;
+                go_update('contacts', (int) $c['id'], ['tags' => json_encode($tags, JSON_UNESCAPED_SLASHES), 'updated_at' => time()]);
+                wf_fire_tags_added((int) $c['id'], $before, $tags);
+            }
         } elseif ($type === 'task') {
             go_insert('tasks', ['contact_id' => (int) $c['id'], 'title' => render_merge((string) ($step['title'] ?? 'Follow up'), $c), 'due_date' => date('Y-m-d', time() + max(0, (int) ($step['due_days'] ?? 1)) * 86400), 'status' => 'open', 'created_at' => time()]);
         }
