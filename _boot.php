@@ -29,6 +29,11 @@ const LOGIN_LOCK_SECS = 600;
 
 date_default_timezone_set((string) ($CFG['timezone'] ?? 'UTC'));
 if (!is_dir(DATA_DIR)) @mkdir(DATA_DIR, 0750, true);
+// The data folder holds the database and sessions. On Apache it is kept private by an .htaccess file;
+// write one if it is missing (a git clone or a partial upload may not carry it). nginx needs its own deny rule.
+if (is_dir(DATA_DIR) && !is_file(DATA_DIR . '/.htaccess')) {
+    @file_put_contents(DATA_DIR . '/.htaccess', "# Block all web access to the database + sessions (Apache). nginx users: deny /data in the server block.\nRequire all denied\nDeny from all\n");
+}
 
 /* URL base path, so the app works installed at the web root OR in a subfolder, on any host,
  * with no rewrite rules (plain .php URLs). e.g. SCRIPT_NAME /free/contacts.php -> BASE "/free". */

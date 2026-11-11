@@ -1,0 +1,3 @@
+# Block all web access to the database + sessions (Apache). nginx users: deny /data in the server block.
+Require all denied
+Deny from all

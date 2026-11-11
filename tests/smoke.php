@@ -115,6 +115,7 @@ try {
     check('dashboard renders', $r['code'] === 200 && strpos($r['body'], 'Good day') !== false, 'HTTP ' . $r['code']);
     $adminId = (int) one($dir, "SELECT id FROM users WHERE email='ada@example.test'");
     check('database is at schema version 2', one($dir, "SELECT v FROM settings WHERE k='schema_version'") === '2');
+    check('the data folder protects itself on Apache', str_contains((string) @file_get_contents($dir . DS . 'data' . DS . '.htaccess'), 'Require all denied'));
     $h1 = schema_hash($dir);
     file_put_contents($dir . DS . 'again.php', "<?php require __DIR__ . '/_boot.php'; db(); echo 'ok';");
     $o1 = run_php($dir . DS . 'again.php'); $o2 = run_php($dir . DS . 'again.php');
