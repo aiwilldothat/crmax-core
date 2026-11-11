@@ -73,10 +73,33 @@ Workflows and campaign sending run from a scheduled task. Add one line to cron t
 * * * * * php /path/to/crmax-core/cron.php >/dev/null 2>&1
 ```
 
-Prefer HTTP? Set `cron_key` in `config.php` (copy `config.sample.php`) and schedule
-`GET https://your-crm/cron.php?key=YOUR_KEY` every minute.
+Then tell the CRM its web address in `config.php` (copy `config.sample.php` to `config.php` if you
+have none). On the command line there is no web request to learn the address from, so without this the
+unsubscribe and open-tracking links in campaign and workflow email point at `localhost` and do not work:
 
-> On the built-in PHP dev server, workflows and campaigns also run inline, so you don't need cron while testing.
+```php
+return [
+    'base_url' => 'https://crm.example.com',   // or https://example.com/crm when it lives in a subfolder
+];
+```
+
+`base_url` is used on the command line only; pages in the browser always use the address they were
+opened at. Run `php cron.php` once by hand to check: it prints a warning if `base_url` is missing.
+
+Prefer HTTP? Set `cron_key` in `config.php` and schedule `GET https://your-crm/cron.php?key=YOUR_KEY`
+every minute. Call it at the CRM's public address, because that is the address the links in the email use.
+
+**Settings -> Background jobs** shows when cron.php last ran, and every admin page shows a warning while
+the email it sends has links that cannot work.
+
+> On the built-in PHP dev server, campaigns also send straight away when you press Send. Workflow steps
+> always wait for cron.php, so run `php cron.php` by hand to move them along while testing.
+
+## Timezone
+
+Choose the organisation's timezone in **Settings -> Organization**; dates, due dates and reports use it.
+To fix it for the whole server instead, set `'timezone' => 'Australia/Sydney'` in `config.php`. That
+setting wins, and the Settings field then shows it read-only.
 
 ## AI (optional, bring your own key)
 
@@ -125,6 +148,14 @@ have is changed or removed. Copy `data/crm.sqlite` somewhere safe first, as you 
 
 Upgrading from 1.0 to 1.1 turns every company name already typed on a contact into a company record
 and links the contacts to it.
+
+Upgrading from 1.1.0 to 1.1.1 changes no data. Check three things afterwards:
+
+- If cron.php runs from the command line, add `base_url` to `config.php` (see Background jobs). Without
+  it, email sent by cron had unsubscribe links pointing at `localhost`, and those links did not work.
+- Workflow emails now carry an unsubscribe link and a `List-Unsubscribe` header, like campaigns.
+- The timezone chosen in Settings now takes effect (in 1.1.0 only the `config.php` value did). Check that
+  Settings -> Organization shows the timezone you want.
 
 ## Backups
 

@@ -144,7 +144,10 @@ function head(string $title, string $active = '', ?array $u = null): void {
  <div style="flex:1;min-width:0">
   <div class="topbar"><button class="burger" onclick="toggleSide()" aria-label="Menu">&#9776;</button><span class="logo" style="padding:0;font-size:1.05rem"><?= crmax_logo(26) ?><?= crmax_wordmark() ?></span></div>
   <main class="main">
-<?php echo flash_html();
+<?php if (is_admin($u) && cron_links_problem() !== ''): ?>
+  <div class="flash err">The links in email sent by cron.php cannot work, unsubscribe links included. <a href="<?= h(url('settings.php#cron')) ?>">See how to fix it</a>.</div>
+<?php endif;
+    echo flash_html();
 }
 function foot(): void { ?>
   </main>

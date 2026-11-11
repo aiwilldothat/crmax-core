@@ -48,7 +48,7 @@ function smtp_send(array $acc, string $to, string $subject, string $html, array 
     $fail = function (string $m) use ($fp) { @fwrite($fp, "QUIT\r\n"); @fclose($fp); return ['ok' => false, 'err' => $m]; };
 
     [$code] = smtp_read($fp); if ($code !== 220) return $fail("SMTP greeting failed ($code)");
-    $ehloHost = (string) ($_SERVER['HTTP_HOST'] ?? 'localhost');
+    $ehloHost = mail_host();
     [$ok] = smtp_cmd($fp, 'EHLO ' . $ehloHost, 250); if (!$ok) { [$ok2] = smtp_cmd($fp, 'HELO ' . $ehloHost, 250); if (!$ok2) return $fail('EHLO rejected'); }
     if ($secure === 'tls') {
         [$ok] = smtp_cmd($fp, 'STARTTLS', 220); if (!$ok) return $fail('STARTTLS not available');
@@ -70,8 +70,11 @@ function smtp_send(array $acc, string $to, string $subject, string $html, array 
     $text = trim(html_entity_decode(strip_tags(preg_replace('#<br\s*/?>#i', "\n", $html)), ENT_QUOTES, 'UTF-8'));
     $fromHdr = $fromName !== '' ? '=?UTF-8?B?' . base64_encode($fromName) . '?= <' . $fromEmail . '>' : $fromEmail;
     $headers = "From: $fromHdr\r\nTo: <$to>\r\nSubject: $encSubject\r\n";
-    if (($opts['reply_to'] ?? '') !== '') $headers .= 'Reply-To: ' . $opts['reply_to'] . "\r\n";
-    if (($opts['unsubscribe'] ?? '') !== '') $headers .= 'List-Unsubscribe: <' . $opts['unsubscribe'] . ">\r\n";
+    // Only a plain address / a URL without spaces or brackets, so a value can never add a header of its own.
+    $replyTo = trim((string) ($opts['reply_to'] ?? ''));
+    if ($replyTo !== '' && filter_var($replyTo, FILTER_VALIDATE_EMAIL)) $headers .= 'Reply-To: ' . $replyTo . "\r\n";
+    $unsub = (string) ($opts['unsubscribe'] ?? '');
+    if ($unsub !== '' && !preg_match('/[\s<>]/', $unsub)) $headers .= 'List-Unsubscribe: <' . $unsub . ">\r\n";
     $headers .= "MIME-Version: 1.0\r\n";
     $headers .= 'Date: ' . date('r') . "\r\n";
     $headers .= 'Message-ID: <' . bin2hex(random_bytes(12)) . '@' . $ehloHost . ">\r\n";
@@ -87,12 +90,28 @@ function smtp_send(array $acc, string $to, string $subject, string $html, array 
     return $code === 250 ? ['ok' => true, 'err' => ''] : ['ok' => false, 'err' => 'Send rejected (' . trim($t) . ')'];
 }
 
-/** High-level send: pick an account (default or $opts['from_account']), send one email. */
+/**
+ * The host name this CRM sends mail as (EHLO and Message-ID): the web request's host, or on the command
+ * line the host of config.php 'base_url'. The port is dropped, an IPv4 address is bracketed as SMTP wants,
+ * and anything else that is not a plain host name falls back to localhost.
+ */
+function mail_host(): string {
+    $h = (string) ($_SERVER['HTTP_HOST'] ?? '');
+    if ($h === '' && BASE_URL_CFG !== '') $h = (string) parse_url(BASE_URL_CFG, PHP_URL_HOST);
+    $h = strtolower((string) preg_replace('/:\d*$/', '', trim($h)));
+    if (filter_var($h, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) return '[' . $h . ']';
+    return preg_match('/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/', $h) ? $h : 'localhost';
+}
+
+/**
+ * High-level send: pick an account (default or $opts['from_account']), send one email.
+ * Replies go to the account's from address unless the caller passes its own $opts['reply_to'].
+ */
 function send_mail(string $to, string $subject, string $html, array $opts = []): array {
     $acc = isset($opts['from_account']) && $opts['from_account'] ? email_account_get((int) $opts['from_account']) : email_account_default();
     if (!$acc) return ['ok' => false, 'err' => 'No email account configured. Add one in Settings to send email.'];
-    $o = $acc['from_email'] !== '' ? ['reply_to' => $acc['from_email']] : [];
-    return smtp_send($acc, $to, $subject, $html, $o + $opts);
+    $defaults = $acc['from_email'] !== '' ? ['reply_to' => $acc['from_email']] : [];
+    return smtp_send($acc, $to, $subject, $html, $opts + $defaults);
 }
 
 /* ----------------------------------------------------------- merge tags ---- */
@@ -326,9 +345,11 @@ function wf_run_due(int $limit = 100): int {
             $done++; continue;
         } elseif ($type === 'email') {
             if ((int) ($c['dnd_email'] ?? 0) !== 1 && ($c['email'] ?? '') !== '') {
+                // Like campaigns: an unsubscribe link in the footer and a List-Unsubscribe header (Spam Act, CAN-SPAM).
+                $unsub = unsub_url((int) $c['id']);
                 $subject = render_merge((string) ($step['subject'] ?? ''), $c);
-                $bodyHtml = email_wrap(render_merge(nl2br_html((string) ($step['body'] ?? '')), $c));
-                send_mail((string) $c['email'], $subject, $bodyHtml);
+                $bodyHtml = email_wrap(render_merge(nl2br_html((string) ($step['body'] ?? '')), $c), ['footer' => unsub_footer($unsub)]);
+                send_mail((string) $c['email'], $subject, $bodyHtml, ['unsubscribe' => $unsub]);
                 act_log((int) $c['id'], 'workflow_email', ['workflow' => $wf['name'], 'subject' => $subject]);
             }
         } elseif ($type === 'tag') {
@@ -386,10 +407,9 @@ function camp_run_due(int $limit = 50): int {
         foreach ($rows as $r) {
             $c = go_get('contacts', (int) $r['contact_id']);
             if (!$c || ($c['email'] ?? '') === '' || (int) $c['dnd_email'] === 1) { go_update('campaign_recipients', (int) $r['id'], ['status' => 'skipped']); continue; }
-            $unsub = base_url() . '/u.php?c=' . urlencode(unsub_token((int) $c['id']));
-            $footer = 'You are receiving this from ' . h(org_name()) . '. <a href="' . h($unsub) . '">Unsubscribe</a>.';
+            $unsub = unsub_url((int) $c['id']);
             $pixel = '<img src="' . h(base_url() . '/t.php?c=' . (int) $camp['id'] . '&r=' . (int) $r['id']) . '" width="1" height="1" alt="" style="display:none">';
-            $html = email_wrap(render_merge($camp['body'], $c) . $pixel, ['footer' => $footer]);
+            $html = email_wrap(render_merge($camp['body'], $c) . $pixel, ['footer' => unsub_footer($unsub)]);
             $res = $acc ? smtp_send($acc, (string) $c['email'], render_merge($camp['subject'], $c), $html, ['unsubscribe' => $unsub]) : ['ok' => false, 'err' => 'no account'];
             if ($res['ok']) { go_update('campaign_recipients', (int) $r['id'], ['status' => 'sent', 'sent_at' => time()]); db()->prepare("UPDATE campaigns SET sent_count=sent_count+1 WHERE id=?")->execute([(int) $camp['id']]); $sent++; }
             else { go_update('campaign_recipients', (int) $r['id'], ['status' => 'failed']); db()->prepare("UPDATE campaigns SET fail_count=fail_count+1 WHERE id=?")->execute([(int) $camp['id']]); }
@@ -399,6 +419,10 @@ function camp_run_due(int $limit = 50): int {
     return $sent;
 }
 function unsub_token(int $contactId): string { return $contactId . '.' . substr(hash_hmac('sha256', (string) $contactId, app_secret()), 0, 16); }
+/** A contact's one-click unsubscribe link. On the command line it needs config.php 'base_url' (see _boot.php). */
+function unsub_url(int $contactId): string { return base_url() . '/u.php?c=' . urlencode(unsub_token($contactId)); }
+/** The footer campaign and workflow email carry: who it is from, and the unsubscribe link. */
+function unsub_footer(string $unsubUrl): string { return 'You are receiving this from ' . h(org_name()) . '. <a href="' . h($unsubUrl) . '">Unsubscribe</a>.'; }
 function unsub_verify(string $tok): int {
     $p = explode('.', $tok, 2); if (count($p) !== 2) return 0;
     return hash_equals(substr(hash_hmac('sha256', $p[0], app_secret()), 0, 16), $p[1]) ? (int) $p[0] : 0;

@@ -18,7 +18,7 @@ declare(strict_types=1);
 $CFG = is_file(__DIR__ . '/config.php') ? (include __DIR__ . '/config.php') : [];
 if (!is_array($CFG)) $CFG = [];
 
-const APP_VERSION = '1.1.0';
+const APP_VERSION = '1.1.1';
 define('APP_NAME', (string) ($CFG['app_name'] ?? 'CRMax Core'));
 define('DATA_DIR', (string) ($CFG['data_dir'] ?? (__DIR__ . '/data')));
 define('DB_FILE', (string) ($CFG['db_file'] ?? (DATA_DIR . '/crm.sqlite')));
@@ -27,7 +27,10 @@ define('SESSION_IDLE', 1209600);        // 14 days
 const LOGIN_MAX_FAILS = 6;
 const LOGIN_LOCK_SECS = 600;
 
+// A config.php 'timezone' fixes the timezone. Without one, the timezone chosen in Settings > Organization
+// applies as soon as the database is open (tz_apply()); UTC until then.
 date_default_timezone_set((string) ($CFG['timezone'] ?? 'UTC'));
+define('TZ_FROM_CONFIG', trim((string) ($CFG['timezone'] ?? '')) !== '');
 if (!is_dir(DATA_DIR)) @mkdir(DATA_DIR, 0750, true);
 // The data folder holds the database and sessions. On Apache it is kept private by an .htaccess file;
 // write one if it is missing (a git clone or a partial upload may not carry it). nginx needs its own deny rule.
@@ -36,10 +39,19 @@ if (is_dir(DATA_DIR) && !is_file(DATA_DIR . '/.htaccess')) {
 }
 
 /* URL base path, so the app works installed at the web root OR in a subfolder, on any host,
- * with no rewrite rules (plain .php URLs). e.g. SCRIPT_NAME /free/contacts.php -> BASE "/free". */
-define('BASE', rtrim(str_replace('\\', '/', dirname((string) ($_SERVER['SCRIPT_NAME'] ?? '/'))), '/'));
+ * with no rewrite rules (plain .php URLs). e.g. SCRIPT_NAME /free/contacts.php -> BASE "/free".
+ * The command line (php cron.php, which sends campaign and workflow email) has no web request to learn
+ * the address from, so there config.php 'base_url' (e.g. https://example.com/crm) supplies it. Without
+ * it, unsubscribe and open-tracking links in that email would point at http://localhost.
+ * BASE_URL_CFG is that address without a trailing slash: set only on the command line, and only when it
+ * is a full http(s) address. */
+$__base_url = PHP_SAPI === 'cli' ? rtrim(trim((string) ($CFG['base_url'] ?? '')), '/') : '';
+define('BASE_URL_CFG', preg_match('#^https?://[^/\s?\#@]+(/[^\s?\#]*)?$#i', $__base_url) ? $__base_url : '');
+unset($__base_url);
+define('BASE', BASE_URL_CFG !== '' ? rtrim((string) parse_url(BASE_URL_CFG, PHP_URL_PATH), '/') : rtrim(str_replace('\\', '/', dirname((string) ($_SERVER['SCRIPT_NAME'] ?? '/'))), '/'));
 function url(string $p = ''): string { return BASE . '/' . ltrim($p, '/'); }
 function base_url(): string {
+    if (BASE_URL_CFG !== '') return BASE_URL_CFG;
     $https = (($_SERVER['HTTPS'] ?? '') === 'on') || (($_SERVER['SERVER_PORT'] ?? '') === '443')
         || (($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '') === 'https');
     $host = (string) ($_SERVER['HTTP_HOST'] ?? 'localhost');
@@ -59,6 +71,7 @@ function db(): PDO {
     $pdo->exec('PRAGMA busy_timeout=5000');
     if ($fresh) @chmod(DB_FILE, 0640);
     db_migrate($pdo);
+    tz_apply();
     return $pdo;
 }
 function db_migrate(PDO $pdo): void {
@@ -200,6 +213,35 @@ function app_secret(): string { return (string) setting_get('app_secret', 'x'); 
 function org(): array { $j = json_decode((string) setting_get('org', '{}'), true); return is_array($j) ? $j : []; }
 function org_set(array $o): void { setting_set('org', json_encode($o, JSON_UNESCAPED_SLASHES)); }
 function org_name(): string { return (string) (org()['name'] ?? APP_NAME); }
+/** Use the organisation's timezone (Settings > Organization), unless config.php fixes one. Runs once, from db(). */
+function tz_apply(): void {
+    if (TZ_FROM_CONFIG) return;
+    $tz = (string) (org()['timezone'] ?? '');
+    if ($tz !== '' && in_array($tz, timezone_identifiers_list(), true)) date_default_timezone_set($tz);
+}
+
+/* ------------------------------------------------------------ cron status -- */
+/** Note that cron.php just ran: when, how ($via 'cli' or 'web'), and whether the links in its email can work. */
+function cron_record(string $via): void {
+    $links = $via === 'cli' ? BASE_URL_CFG : base_url();
+    setting_set('cron_last', json_encode(['at' => time(), 'via' => $via, 'base_url' => $links,
+        'links_ok' => $links !== '' && !url_is_local($links)], JSON_UNESCAPED_SLASHES));
+}
+/** The last cron.php run: ['at' => int, 'via' => 'cli'|'web', 'base_url' => string, 'links_ok' => bool], or [] before the first. */
+function cron_last(): array { return jdec(setting_get('cron_last', '')); }
+/** Why links in email sent by cron.php cannot work (unsubscribe links included), or '' when they can or cron has not run. */
+function cron_links_problem(): string {
+    $last = cron_last();
+    if (!$last || !empty($last['links_ok'])) return '';
+    if (($last['via'] ?? '') === 'cli') return "cron.php runs from the command line and config.php has no public 'base_url', so the links in the email it sends, unsubscribe links included, point at this server's own address and cannot work.";
+    return 'cron.php is called at ' . ($last['base_url'] ?? '') . ', a local address, so the links in the email it sends, unsubscribe links included, point there and cannot work.';
+}
+/** True when $url points at this machine (localhost, 127.x.x.x, ::1): nobody reading an email can open it. */
+function url_is_local(string $url): bool {
+    $h = strtolower(trim((string) parse_url($url, PHP_URL_HOST), '[]'));
+    if ($h === '' || $h === 'localhost' || str_ends_with($h, '.localhost')) return true;
+    return $h === '::1' || (filter_var($h, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) && str_starts_with($h, '127.'));
+}
 
 /* ------------------------------------------------------------------ users -- */
 function user_by_email(string $e): ?array { $st = db()->prepare("SELECT * FROM users WHERE email=?"); $st->execute([mb_strtolower(trim($e))]); return $st->fetch() ?: null; }

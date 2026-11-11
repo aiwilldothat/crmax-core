@@ -68,7 +68,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 }
 
 $o = org(); $accounts = email_accounts(); $team = users_all();
-$tz = $o['timezone'] ?? 'UTC';
+$tz = $o['timezone'] ?? date_default_timezone_get();
+$cronLast = cron_last(); $cronWhy = cron_links_problem();
+// The address to suggest for config.php 'base_url': the one this page was opened at, unless that is local too.
+$suggestBase = url_is_local(base_url()) ? 'https://crm.example.com' : base_url();
 head('Settings', 'settings', $u);
 ?>
 <div class="pagehead"><h1>Settings</h1></div>
@@ -77,7 +80,8 @@ head('Settings', 'settings', $u);
 <div class="card"><h2>Organization</h2>
   <form method="post"><?= csrf_field() ?><input type="hidden" name="do" value="org">
     <div class="row"><div><label>Name</label><input name="name" value="<?= h($o['name'] ?? 'My Company') ?>"></div>
-      <div><label>Timezone</label><select name="timezone"><?php foreach (timezone_identifiers_list() as $z): ?><option <?= $z === $tz ? 'selected' : '' ?>><?= h($z) ?></option><?php endforeach; ?></select></div></div>
+      <div><label>Timezone</label><?php if (TZ_FROM_CONFIG): ?><select disabled><option><?= h(date_default_timezone_get()) ?></option></select><p class="small muted" style="margin-top:4px">Set by 'timezone' in config.php.</p>
+        <?php else: ?><select name="timezone"><?php foreach (timezone_identifiers_list() as $z): ?><option <?= $z === $tz ? 'selected' : '' ?>><?= h($z) ?></option><?php endforeach; ?></select><?php endif; ?></div></div>
     <label>Notifications email (where form alerts are sent; blank = first admin)</label><input name="notify_email" value="<?= h($o['notify_email'] ?? '') ?>" placeholder="you@company.com">
     <button class="btn sm" style="margin-top:14px">Save</button>
   </form>
@@ -106,6 +110,21 @@ head('Settings', 'settings', $u);
     <button class="btn sm" style="margin-top:12px">Save account</button>
     <p class="small muted" style="margin-top:8px">Tip: for Gmail/Google Workspace use an App Password; most providers use port 587 (STARTTLS) or 465 (SSL).</p>
   </form></details>
+</div>
+
+<div class="card" id="cron"><h2>Background jobs (cron)</h2>
+  <?php if (!$cronLast): ?>
+  <p class="small muted">cron.php has not run yet. Workflow steps and campaign sending wait for it: schedule it to run every minute, for example</p>
+  <p class="small mono" style="margin-top:6px">* * * * * php <?= h(str_replace('\\', '/', __DIR__)) ?>/cron.php</p>
+  <p class="small muted" style="margin-top:6px">and set <span class="mono">'base_url' =&gt; '<?= h($suggestBase) ?>'</span> in config.php, so the links in the email it sends work.</p>
+  <?php else: ?>
+  <p class="small muted">cron.php last ran <?= h(ago((int) ($cronLast['at'] ?? 0))) ?> <?= ($cronLast['via'] ?? '') === 'cli' ? 'from the command line' : 'over the web' ?><?= !empty($cronLast['links_ok']) ? '. Links in the email it sends use ' . h((string) $cronLast['base_url']) . '.' : '.' ?></p>
+  <?php endif; ?>
+  <?php if ($cronWhy !== ''): ?>
+  <div class="flash err" style="margin:12px 0 0"><?= h($cronWhy) ?>
+    <?php if (($cronLast['via'] ?? '') === 'cli'): ?><br>Add this line to config.php (copy config.sample.php to config.php if there is none):<br><span class="mono">'base_url' =&gt; '<?= h($suggestBase) ?>',</span>
+    <?php else: ?><br>Call <span class="mono"><?= h($suggestBase) ?>/cron.php?key=...</span> instead, or run cron.php from the command line with 'base_url' set in config.php.<?php endif; ?></div>
+  <?php endif; ?>
 </div>
 
 <div class="card" id="team"><h2>Team</h2>
