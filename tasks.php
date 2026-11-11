@@ -53,7 +53,7 @@ head('Tasks', 'tasks', $u);
 <div class="card">
   <form method="post" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px"><?= csrf_field() ?><input type="hidden" name="do" value="add">
     <input name="title" placeholder="Add a task..." required style="flex:1;min-width:200px"><input type="date" name="due_date" style="width:auto">
-    <select name="assigned_to" aria-label="Assign the task to" title="Assign the task to" style="width:auto;max-width:170px"><?= user_options((int) $u['id']) ?></select>
+    <select name="assigned_to" aria-label="Assign the task to" title="Assign the task to" style="width:auto;max-width:170px"><?= user_options(who_default($who, (int) $u['id'])) ?></select>
     <button class="btn sm">Add task</button></form>
   <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px">
     <?php foreach (['open' => 'Open', 'today' => 'Due today', 'overdue' => 'Overdue', 'done' => 'Done'] as $k => $lbl): ?>

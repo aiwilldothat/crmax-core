@@ -102,10 +102,10 @@ $savedProbs = jdec($pipe['stage_probs']) ? $probs : [];
 $sel = "SELECT d.*, c.first_name, c.last_name, c.email, co.name company_name, us.name owner_name, us.email owner_email
         FROM deals d LEFT JOIN contacts c ON c.id=d.contact_id LEFT JOIN companies co ON co.id=d.company_id LEFT JOIN users us ON us.id=d.owner_id";
 // The board and the closed list follow the "whose deals" filter: everyone's by default, or one owner's.
-$who = who_filter('pipeline');
-[$whoSql, $whoParams] = who_sql('d.owner_id', $who, (int) $u['id']);
+$view = who_filter('pipeline');   // not $who: the cards below use that name for a deal's company
+[$whoSql, $whoParams] = who_sql('d.owner_id', $view, (int) $u['id']);
 $and = $whoSql !== '' ? " AND $whoSql" : '';
-$whose = $who === 'me' ? 'your deals' : ($who === 'none' ? 'deals with no owner' : ($who !== 'all' ? 'deals owned by ' . user_label(user_by_id((int) $who)) : ''));
+$whose = $view === 'me' ? 'your deals' : ($view === 'none' ? 'deals with no owner' : ($view !== 'all' ? 'deals owned by ' . user_label(user_by_id((int) $view)) : ''));
 $st = db()->prepare("$sel WHERE d.pipeline_id=? AND d.status='open'$and ORDER BY d.updated_at DESC"); $st->execute(array_merge([$pid], $whoParams)); $deals = $st->fetchAll();
 $st = db()->prepare("$sel WHERE d.pipeline_id=? AND d.status!='open'$and ORDER BY d.closed_at DESC, d.id DESC LIMIT 20"); $st->execute(array_merge([$pid], $whoParams)); $closed = $st->fetchAll();
 $focus = (int) ($_GET['deal'] ?? 0);   // deep link from a contact or company page: open this deal's editor
@@ -140,7 +140,7 @@ head('Pipeline', 'pipelines', $u);
 <div class="pagehead"><h1>Pipeline</h1>
   <div class="sp">
     <?php if (count($pipes) > 1): ?><select onchange="location=this.value" style="width:auto" aria-label="Pipeline"><?php foreach ($pipes as $p): ?><option value="<?= h(url('pipelines.php?id=' . (int) $p['id'])) ?>" <?= (int) $p['id'] === $pid ? 'selected' : '' ?>><?= h($p['name']) ?></option><?php endforeach; ?></select><?php endif; ?>
-    <?= who_select($who, $u, who_onchange('pipelines.php?id=' . $pid)) ?>
+    <?= who_select($view, $u, who_onchange('pipelines.php?id=' . $pid)) ?>
     <button class="btn ghost sm" onclick="document.getElementById('pedit').classList.toggle('open2')">Edit stages</button>
     <button class="btn" onclick="openDeal(0)">+ New deal</button>
   </div></div>
@@ -232,7 +232,8 @@ head('Pipeline', 'pipelines', $u);
 </div>
 
 <script>
-var DEALS=<?= jscript($js) ?>,PROBS=<?= jscript($probs) ?>,ME=<?= (int) $u['id'] ?>,FOCUS=<?= $focus ?>;
+// NEWOWNER: who a new deal starts out with - you, or the person the board is filtered to, so the deal stays in view.
+var DEALS=<?= jscript($js) ?>,PROBS=<?= jscript($probs) ?>,NEWOWNER=<?= who_default($view, (int) $u['id']) ?>,FOCUS=<?= $focus ?>;
 // Form controls are read through .elements[...] because a control named "id" or "name" would otherwise
 // be confused with the form's own id and name properties.
 function fld(n){return document.getElementById('dealform').elements[n];}
@@ -244,7 +245,7 @@ function openDeal(id){
  fld('close_date').value=d?d.close_date:'';fld('probability').value=d?d.probability:'';fld('company').value=d?d.company:'';fld('notes').value=d?d.notes:'';
  var cs=fld('contact_id'),cid=d?d.contact_id:0;
  if(cid&&!cs.querySelector('option[value="'+cid+'"]')){var o=document.createElement('option');o.value=cid;o.textContent=d.contact_name||('Contact #'+cid);cs.appendChild(o);}
- cs.value=cid;fld('owner_id').value=d?d.owner_id:ME;
+ cs.value=cid;fld('owner_id').value=d?d.owner_id:NEWOWNER;
  document.getElementById('dealtitle').textContent=d?'Edit deal':'New deal';
  del.style.display=d?'block':'none';del.elements['id'].value=id||0;
  probHint();document.getElementById('dealbg').classList.add('open');fld('name').focus();

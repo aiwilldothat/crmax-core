@@ -366,6 +366,11 @@ function who_sql(string $col, string $who, int $me): array {
     return ['', []];
 }
 /**
+ * Who something new should start out with while a filter is on: the person being shown, nobody under
+ * Unassigned, otherwise whoever is adding it - so what you add stays on the list you are looking at.
+ */
+function who_default(string $who, int $me): int { return ctype_digit($who) ? valid_user_id((int) $who) : ($who === 'none' ? 0 : $me); }
+/**
  * The team member chosen in a posted picker: 0 for "nobody", and $default when the field was not
  * sent at all (a page from before the picker existed) or names someone who is not on the team.
  */

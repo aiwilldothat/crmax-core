@@ -772,6 +772,7 @@ try {
     check('tasks: Unassigned shows only tasks nobody has', str_contains($b, 'Call Olga') && !str_contains($b, 'My own task') && !str_contains($b, 'Send Olga a quote') && str_contains($b, 'Due today (1)'));
     $b = $w->get('/tasks.php?who=' . $bob)['body'];
     check('tasks: a person shows only their tasks', str_contains($b, 'Send Olga a quote') && !str_contains($b, 'My own task') && !str_contains($b, 'Call Olga'));
+    check('a task added while looking at one person starts out as theirs', preg_match('/<select name="assigned_to"[^>]*>.*?<option value="' . $bob . '" selected>Bob Member<\/option>/s', $b) === 1);
     $b = $w->get('/tasks.php?f=done')['body'];
     check('an empty filtered list offers the way back to everyone', str_contains($b, 'Nothing here.') && str_contains($b, "Show everyone's tasks"));
     $w->get('/tasks.php?who=all');
@@ -783,12 +784,17 @@ try {
     $b = $w->get('/pipelines.php?id=' . $wpid . '&who=' . $bob)['body'];
     check('pipeline: a person shows only their deals, and totals only those', str_contains($b, 'Deal for Bob') && !str_contains($b, 'Deal for Ada') && !str_contains($b, 'Deal for nobody')
         && str_contains($b, '1 open deal &middot; $500.00 USD') && str_contains($b, 'showing only deals owned by Bob Member'));
+    $starts = [(string) $bob => str_contains($b, 'NEWOWNER=' . $bob . ',')];   // who a new deal starts out with, per filter
     $b = $w->get('/pipelines.php?id=' . $wpid . '&who=me')['body'];
     check('pipeline: Mine shows only my deals', str_contains($b, 'Deal for Ada') && !str_contains($b, 'Deal for Bob') && !str_contains($b, 'Deal for nobody'));
+    $starts['me'] = str_contains($b, 'NEWOWNER=' . $ada . ',');
     $b = $w->get('/pipelines.php?id=' . $wpid . '&who=none')['body'];
     check('pipeline: Unassigned shows only deals with no owner', str_contains($b, 'Deal for nobody') && !str_contains($b, 'Deal for Ada') && !str_contains($b, 'Deal for Bob'));
+    $starts['none'] = str_contains($b, 'NEWOWNER=0,');
     $b = $w->get('/pipelines.php?id=' . $wpid . '&who=all')['body'];
     check('pipeline: Everyone shows the whole board', str_contains($b, 'Deal for Bob') && str_contains($b, 'Deal for Ada') && str_contains($b, 'Deal for nobody') && str_contains($b, '3 open deals') && !str_contains($b, 'showing only'));
+    $starts['all'] = str_contains($b, 'NEWOWNER=' . $ada . ',');
+    check('a new deal starts out with the person the board is showing, so it stays in view', !in_array(false, $starts, true) && count($starts) === 4, json_encode($starts));
 
     $b = $w->get('/index.php?who=' . $bob)['body'];
     check("dashboard: a person's numbers and lists are theirs alone", str_contains($b, '<div class="n">1</div><div class="l">Contacts</div>') && str_contains($b, '<div class="n">$500.00 USD</div><div class="l">Pipeline value</div>')
