@@ -18,15 +18,18 @@ declare(strict_types=1);
 $CFG = is_file(__DIR__ . '/config.php') ? (include __DIR__ . '/config.php') : [];
 if (!is_array($CFG)) $CFG = [];
 
-const APP_VERSION = '1.2.0';
+const APP_VERSION = '1.2.1';
 define('APP_NAME', (string) ($CFG['app_name'] ?? 'CRMax Core'));
 define('DATA_DIR', (string) ($CFG['data_dir'] ?? (__DIR__ . '/data')));
 define('DB_FILE', (string) ($CFG['db_file'] ?? (DATA_DIR . '/crm.sqlite')));
 define('DEV', (bool) ($CFG['dev'] ?? (PHP_SAPI === 'cli-server')));
 // Amounts show as "$1,234.00 USD": config.php 'currency' is the code after the amount ('' shows none) and
 // 'currency_symbol' the sign before it (e.g. 'EUR' and the euro sign).
+// New constants get a CRMAX_ prefix: PHP itself defines some generic names, and only on some systems.
+// 1.2.0 called this one CURRENCY_SYMBOL, which PHP on Linux and macOS already has (an nl_langinfo() item,
+// 262145), so define() failed there and every amount printed as "262145" followed by the number.
 define('CURRENCY', strtoupper(trim((string) ($CFG['currency'] ?? 'USD'))));
-define('CURRENCY_SYMBOL', (string) ($CFG['currency_symbol'] ?? '$'));
+define('CRMAX_CURRENCY_SYMBOL', (string) ($CFG['currency_symbol'] ?? '$'));
 // config.php 'allow_install' => false: while there are no accounts, the first visitor gets "Not set up yet"
 // instead of the set-up form that makes them the admin.
 define('ALLOW_INSTALL', ($CFG['allow_install'] ?? true) !== false);
@@ -372,7 +375,7 @@ function sanitize_html(string $html): string {
     return (string) $html;
 }
 /** An amount for display, e.g. "$1,234.00 USD", with the sign and code from config.php. $cur overrides the code ('' = none). */
-function money(int $cents, ?string $cur = null): string { $cur ??= CURRENCY; return CURRENCY_SYMBOL . number_format($cents / 100, 2) . ($cur !== '' ? ' ' . strtoupper($cur) : ''); }
+function money(int $cents, ?string $cur = null): string { $cur ??= CURRENCY; return CRMAX_CURRENCY_SYMBOL . number_format($cents / 100, 2) . ($cur !== '' ? ' ' . strtoupper($cur) : ''); }
 function ago(int $ts): string {
     if ($ts <= 0) return '-'; $d = time() - $ts;
     if ($d < 60) return 'just now'; if ($d < 3600) return floor($d / 60) . 'm ago';

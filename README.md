@@ -276,6 +276,11 @@ know afterwards:
 - API: contacts gain `owner_id`, and `GET /users` is new. Every field 1.0 and 1.1 returned is still
   there with the same meaning.
 
+Upgrading from 1.2.0 to 1.2.1 changes no data. It fixes how amounts show on Linux and macOS servers:
+1.2.0 printed `262145` in front of every amount there (`26214541,000.00` instead of `$41,000.00`),
+because PHP on those systems already defines a constant named `CURRENCY_SYMBOL`. Windows servers were
+not affected. The `currency_symbol` setting in `config.php` keeps its name.
+
 ## Backups
 
 Everything lives in `data/crm.sqlite`. Copy that file to back up; replace it to restore. (Because SQLite

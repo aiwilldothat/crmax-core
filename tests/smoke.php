@@ -260,6 +260,31 @@ try {
     $r = $c->post('/contacts.php', ['do' => 'save', 'first_name' => 'No', 'email' => 'no@example.test'], false);
     check('POST without a CSRF token is refused', $r['code'] === 400, 'HTTP ' . $r['code']);
 
+    section('PHP compatibility');
+    // Every constant Core defines (define('X', ...) / const X = ... in the app's own files).
+    $consts = [];
+    foreach (glob($ROOT . DS . '*.php') ?: [] as $f) {
+        if (preg_match_all("/^\s*(?:define\('([A-Z0-9_]+)'|const ([A-Z0-9_]+)\s*=)/m", (string) file_get_contents($f), $cm, PREG_SET_ORDER)) {
+            foreach ($cm as $x) $consts[] = ($x[1] ?? '') !== '' ? $x[1] : $x[2];
+        }
+    }
+    $taken = array_values(array_filter($consts, 'defined'));   // this test has not loaded Core: anything defined is PHP's own
+    check('Core defines no constant that this PHP already has', count($consts) >= 10 && !$taken, implode(', ', $taken));
+    // PHP on Linux and macOS (not Windows) defines nl_langinfo() items with generic names, e.g. CURRENCY_SYMBOL = 262145.
+    // 1.2.0 used that name and printed "262145" in front of every amount there; this catches such a name on Windows too.
+    $langinfo = '/^((AB)?DAY_[1-7]|(AB)?MON_([1-9]|1[0-2])|AM_STR|PM_STR|D_T_FMT|D_FMT|T_FMT|T_FMT_AMPM|ERA|ERA_YEAR|ERA_D_FMT|ERA_D_T_FMT|ERA_T_FMT'
+        . '|ALT_DIGITS|INT_CURR_SYMBOL|CURRENCY_SYMBOL|CRNCYSTR|MON_DECIMAL_POINT|MON_THOUSANDS_SEP|MON_GROUPING|POSITIVE_SIGN|NEGATIVE_SIGN'
+        . '|INT_FRAC_DIGITS|FRAC_DIGITS|[PN]_CS_PRECEDES|[PN]_SEP_BY_SPACE|[PN]_SIGN_POSN|DECIMAL_POINT|RADIXCHAR|THOUSANDS_SEP|THOUSEP|GROUPING'
+        . '|YESEXPR|NOEXPR|YESSTR|NOSTR|CODESET)$/';
+    $unixOnly = array_values(array_filter($consts, fn($n) => preg_match($langinfo, $n) === 1));
+    check('... nor one that PHP defines only on Linux and macOS', !$unixOnly, implode(', ', $unixOnly));
+    file_put_contents($dir . DS . 'boot.php', '<?php $w = []; set_error_handler(function ($no, $msg) use (&$w) { $w[] = $msg; return true; });'
+        . " require __DIR__ . '/lib.php'; restore_error_handler(); echo json_encode(['warnings' => \$w, 'money' => money(4100000)]);");
+    $o = run_php($dir . DS . 'boot.php');
+    $bj = json_decode($o, true) ?: [];
+    check('the app starts without a single PHP warning', ($bj['warnings'] ?? null) === [], $o);
+    check('amounts print as "$41,000.00 USD"', ($bj['money'] ?? '') === '$41,000.00 USD', $o);
+
     section('Companies and contacts');
     $r = $c->post('/contacts.php', ['do' => 'save', 'id' => 0, 'first_name' => 'Cara', 'last_name' => 'Contact', 'email' => 'cara@example.test', 'company' => 'Acme Pty Ltd', 'tags' => 'lead']);
     $cara = id_from($r, '/contact\.php\?id=(\d+)/');
