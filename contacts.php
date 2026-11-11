@@ -31,8 +31,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'updated_at' => time(),
         ];
         if ($data['email'] !== '' && !filter_var($data['email'], FILTER_VALIDATE_EMAIL)) { flash_set('Enter a valid email address.', 'err'); redirect('contacts.php' . ($id ? '?edit=' . $id : '?new=1')); }
-        if ($id && go_get('contacts', $id)) { go_update('contacts', $id, $data); flash_set('Contact updated.'); }
-        else { $data['created_at'] = time(); $id = go_insert('contacts', $data); act_log($id, 'contact_created', ['source' => 'manual']); wf_fire('contact_created', $id); flash_set('Contact added.'); }
+        if ($id && go_get('contacts', $id)) { go_update('contacts', $id, $data); contact_set_company($id, $data['company']); flash_set('Contact updated.'); }
+        else { $data['created_at'] = time(); $data['owner_id'] = (int) $u['id']; $id = go_insert('contacts', $data); contact_set_company($id, $data['company']); act_log($id, 'contact_created', ['source' => 'manual']); wf_fire('contact_created', $id); flash_set('Contact added.'); }
         redirect('contact.php?id=' . $id);
     }
     if ($do === 'delete') {
@@ -63,13 +63,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 $edit = null;
 if (isset($_GET['edit'])) { $edit = go_get('contacts', (int) $_GET['edit']); if (!$edit) redirect('contacts.php'); }
 if (isset($_GET['new']) || $edit) {
-    $c = $edit ?: ['first_name' => '', 'last_name' => '', 'email' => '', 'phone' => '', 'company' => '', 'address' => '', 'source' => '', 'dnd_email' => 0, 'tags' => '[]'];
+    // A new contact can arrive with the company filled in (the "Add person" button on a company page).
+    $c = $edit ?: ['first_name' => '', 'last_name' => '', 'email' => '', 'phone' => '', 'company' => company_clean((string) ($_GET['company'] ?? '')), 'address' => '', 'source' => '', 'dnd_email' => 0, 'tags' => '[]'];
+    $coNames = db()->query("SELECT name FROM companies ORDER BY name COLLATE NOCASE LIMIT 1000")->fetchAll(PDO::FETCH_COLUMN);
     head($edit ? 'Edit contact' : 'New contact', 'contacts', $u);
     echo '<div class="pagehead"><h1>' . ($edit ? 'Edit contact' : 'New contact') . '</h1></div>';
     echo '<div class="card" style="max-width:640px"><form method="post">' . csrf_field() . '<input type="hidden" name="do" value="save"><input type="hidden" name="id" value="' . (int) ($edit['id'] ?? 0) . '">';
     echo '<div class="row"><div><label>First name</label><input name="first_name" value="' . h($c['first_name']) . '"></div><div><label>Last name</label><input name="last_name" value="' . h($c['last_name']) . '"></div></div>';
     echo '<div class="row"><div><label>Email</label><input type="email" name="email" value="' . h($c['email']) . '"></div><div><label>Phone</label><input name="phone" value="' . h($c['phone']) . '"></div></div>';
-    echo '<label>Company</label><input name="company" value="' . h($c['company']) . '">';
+    echo '<label>Company</label><input name="company" value="' . h($c['company']) . '" list="colist" autocomplete="off" placeholder="Start typing - pick an existing company or enter a new one">';
+    echo '<datalist id="colist">'; foreach ($coNames as $cn) echo '<option value="' . h($cn) . '">'; echo '</datalist>';
     echo '<label>Address</label><input name="address" value="' . h($c['address']) . '">';
     echo '<div class="row"><div><label>Tags (comma separated)</label><input name="tags" value="' . h(implode(', ', jdec($c['tags']))) . '"></div><div><label>Source</label><input name="source" value="' . h($c['source']) . '"></div></div>';
     echo '<label style="display:flex;align-items:center;gap:8px;margin-top:12px"><input type="checkbox" name="dnd_email" style="width:auto" ' . ((int) $c['dnd_email'] === 1 ? 'checked' : '') . '> Do not email (unsubscribed)</label>';
@@ -118,7 +121,8 @@ head('Contacts', 'contacts', $u);
   <div class="scrollx"><table class="tbl"><thead><tr><th>Name</th><th>Email</th><th>Phone</th><th>Company</th><th>Tags</th><th>Added</th></tr></thead><tbody>
     <?php foreach ($rows as $c): ?>
     <tr><td><a href="<?= h(url('contact.php?id=' . (int) $c['id'])) ?>"><b><?= h(contact_name($c)) ?></b></a></td>
-        <td class="muted"><?= h($c['email']) ?></td><td class="muted"><?= h($c['phone']) ?></td><td class="muted"><?= h($c['company']) ?></td>
+        <td class="muted"><?= h($c['email']) ?></td><td class="muted"><?= h($c['phone']) ?></td>
+        <td class="muted"><?php if ((int) $c['company_id']): ?><a href="<?= h(url('company.php?id=' . (int) $c['company_id'])) ?>"><?= h($c['company']) ?></a><?php else: ?><?= h($c['company']) ?><?php endif; ?></td>
         <td><?php foreach (jdec($c['tags']) as $tg): ?><span class="tag"><?= h($tg) ?></span> <?php endforeach; ?></td>
         <td class="muted small"><?= h(date('j M Y', (int) $c['created_at'])) ?></td></tr>
     <?php endforeach; ?>

@@ -48,7 +48,7 @@ head(contact_name($c), 'contacts', $u);
     <form method="post" action="<?= h(url('contacts.php')) ?>" onsubmit="return confirm('Delete this contact?')" style="display:inline"><?= csrf_field() ?><input type="hidden" name="do" value="delete"><input type="hidden" name="id" value="<?= $id ?>"><button class="btn danger sm">Delete</button></form></div></div>
 
 <h1 style="font-size:1.5rem;margin-bottom:2px"><?= h(contact_name($c)) ?></h1>
-<p class="muted" style="margin-bottom:16px"><?= h($c['company']) ?><?php foreach (jdec($c['tags']) as $tg): ?> <span class="tag"><?= h($tg) ?></span><?php endforeach; ?><?php if ((int) $c['dnd_email'] === 1): ?> <span class="tag bad">unsubscribed</span><?php endif; ?></p>
+<p class="muted" style="margin-bottom:16px"><?php if ((int) $c['company_id']): ?><a href="<?= h(url('company.php?id=' . (int) $c['company_id'])) ?>"><?= h($c['company']) ?></a><?php else: ?><?= h($c['company']) ?><?php endif; ?><?php foreach (jdec($c['tags']) as $tg): ?> <span class="tag"><?= h($tg) ?></span><?php endforeach; ?><?php if ((int) $c['dnd_email'] === 1): ?> <span class="tag bad">unsubscribed</span><?php endif; ?></p>
 
 <div class="grid2">
  <div>
@@ -74,7 +74,8 @@ head(contact_name($c), 'contacts', $u);
   <div class="card"><h2>Deals</h2>
     <?php if (!$deals): ?><p class="muted small">No deals. <a href="<?= h(url('pipelines.php')) ?>">Create one</a>.</p>
     <?php else: foreach ($deals as $d): $stages = jdec($d['stages']); ?>
-      <div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--line)"><span><a href="<?= h(url('pipelines.php?id=' . (int) $d['pipeline_id'])) ?>"><?= h($d['name'] ?: 'Deal') ?></a> <span class="muted small"><?= h($stages[(int) $d['stage']] ?? '') ?></span></span><b><?= money((int) $d['value_cents']) ?></b></div>
+      <div style="display:flex;justify-content:space-between;gap:10px;padding:6px 0;border-bottom:1px solid var(--line)"><span><a href="<?= h(url('pipelines.php?id=' . (int) $d['pipeline_id'] . '&deal=' . (int) $d['id'])) ?>"><?= h($d['name'] ?: 'Deal') ?></a>
+        <?php if ($d['status'] === 'won'): ?><span class="tag ok">won</span><?php elseif ($d['status'] === 'lost'): ?><span class="tag bad">lost</span><?php else: ?><span class="muted small"><?= h($stages[(int) $d['stage']] ?? '') ?><?= $d['close_date'] !== '' ? ' &middot; closes ' . h($d['close_date']) : '' ?></span><?php endif; ?></span><b><?= money((int) $d['value_cents']) ?></b></div>
     <?php endforeach; endif; ?>
   </div>
  </div>

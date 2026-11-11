@@ -65,7 +65,7 @@ $td = db()->prepare("SELECT COUNT(*) FROM tasks WHERE status='open' AND due_date
 $recent = db()->query("SELECT a.*, c.first_name, c.last_name, c.email FROM activities a LEFT JOIN contacts c ON c.id=a.contact_id ORDER BY a.id DESC LIMIT 12")->fetchAll();
 $myTasks = db()->query("SELECT t.*, c.first_name, c.last_name, c.email FROM tasks t LEFT JOIN contacts c ON c.id=t.contact_id WHERE t.status='open' ORDER BY (t.due_date='') , t.due_date LIMIT 8")->fetchAll();
 
-$actLabel = ['contact_created' => 'New contact', 'form_submitted' => 'Form submitted', 'workflow_email' => 'Workflow email sent', 'note_added' => 'Note added', 'deal_created' => 'Deal created', 'deal_won' => 'Deal won'];
+$actLabel = ['contact_created' => 'New contact', 'form_submitted' => 'Form submitted', 'workflow_email' => 'Workflow email sent', 'email_sent' => 'Email sent', 'note_added' => 'Note added', 'deal_created' => 'Deal created', 'deal_won' => 'Deal won', 'deal_lost' => 'Deal lost'];
 
 head('Dashboard', 'dash', $u);
 ?>

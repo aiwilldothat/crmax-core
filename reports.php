@@ -9,7 +9,32 @@ $monthStart = mktime(0, 0, 0, (int) date('n'), 1);
 $newMonth = (int) db()->query("SELECT COUNT(*) FROM contacts WHERE created_at>=$monthStart")->fetchColumn();
 $open = db()->query("SELECT COUNT(*) n, COALESCE(SUM(value_cents),0) v FROM deals WHERE status='open'")->fetch();
 $won = db()->query("SELECT COUNT(*) n, COALESCE(SUM(value_cents),0) v FROM deals WHERE status='won'")->fetch();
-$wonMonth = db()->query("SELECT COALESCE(SUM(value_cents),0) v FROM deals WHERE status='won' AND updated_at>=$monthStart")->fetch();
+$wonMonth = db()->query("SELECT COALESCE(SUM(value_cents),0) v FROM deals WHERE status='won' AND closed_at>=$monthStart")->fetch();
+$lost = db()->query("SELECT COUNT(*) n FROM deals WHERE status='lost'")->fetch();
+$closedN = (int) $won['n'] + (int) $lost['n'];
+$winRate = $closedN > 0 ? (int) round((int) $won['n'] / $closedN * 100) : null;
+$avgWon = (int) $won['n'] > 0 ? (int) round((int) $won['v'] / (int) $won['n']) : 0;
+$avgDays = db()->query("SELECT AVG((closed_at - created_at) / 86400.0) FROM deals WHERE status='won' AND closed_at>0 AND closed_at>=created_at")->fetchColumn();
+$reasons = db()->query("SELECT lost_reason r, COUNT(*) n FROM deals WHERE status='lost' AND lost_reason!='' GROUP BY lost_reason COLLATE NOCASE ORDER BY n DESC, r LIMIT 5")->fetchAll();
+
+// Forecast: every open deal weighted by its win probability, grouped by the month it is expected to close.
+$probsBy = [];
+foreach (db()->query("SELECT * FROM pipelines")->fetchAll() as $p) $probsBy[(int) $p['id']] = stage_probs($p);
+$blank = ['n' => 0, 'raw' => 0, 'w' => 0];
+$fc = ['overdue' => ['label' => 'Overdue (earlier months)'] + $blank];
+for ($i = 0; $i < 6; $i++) { $ts = mktime(0, 0, 0, (int) date('n') + $i, 1); $fc[date('Y-m', $ts)] = ['label' => date('M Y', $ts)] + $blank; }
+$fc['later'] = ['label' => 'Later'] + $blank;
+$fc['none'] = ['label' => 'No close date'] + $blank;
+$thisMonth = date('Y-m'); $fcWeighted = 0; $fcRaw = 0;
+foreach (db()->query("SELECT * FROM deals WHERE status='open'")->fetchAll() as $d) {
+    $w = deal_weighted($d, $probsBy[(int) $d['pipeline_id']] ?? []);
+    $ym = substr((string) $d['close_date'], 0, 7);
+    $k = $d['close_date'] === '' ? 'none' : ($ym < $thisMonth ? 'overdue' : (isset($fc[$ym]) ? $ym : 'later'));
+    $fc[$k]['n']++; $fc[$k]['raw'] += (int) $d['value_cents']; $fc[$k]['w'] += $w;
+    $fcWeighted += $w; $fcRaw += (int) $d['value_cents'];
+}
+foreach (['overdue', 'later', 'none'] as $k) if ($fc[$k]['n'] === 0) unset($fc[$k]);   // these three only show when they hold something
+$fcMax = max(1, max(array_map(fn($b) => $b['w'], $fc)));
 $campSent = (int) db()->query("SELECT COALESCE(SUM(sent_count),0) FROM campaigns")->fetchColumn();
 $campOpen = (int) db()->query("SELECT COALESCE(SUM(open_count),0) FROM campaigns")->fetchColumn();
 $openRate = $campSent > 0 ? round($campOpen / $campSent * 100) : 0;
@@ -49,6 +74,23 @@ head('Reports', 'reports', $u);
   <div class="kpi"><div class="n"><?= money((int) $wonMonth['v']) ?></div><div class="l">Won this month</div></div>
 </div>
 <div class="grid2">
+  <div class="card"><h2>Forecast &middot; weighted pipeline by expected close</h2>
+    <?php if ($fcRaw === 0 && !array_sum(array_map(fn($b) => $b['n'], $fc))): ?><p class="muted small">No open deals yet. Add deals with an expected close date to see a forecast.</p>
+    <?php else: foreach ($fc as $b) echo bar($b['label'], $b['w'], $fcMax, $b['n'] . ' deal' . ($b['n'] === 1 ? '' : 's') . ', ' . money($b['raw']) . ', weighted ' . money($b['w'])); ?>
+      <p class="small muted" style="margin-top:10px">Weighted total <b style="color:var(--text)"><?= money($fcWeighted) ?></b> of <?= money($fcRaw) ?> open. Each deal counts for its value times its win probability (its own, or its stage's default).</p>
+    <?php endif; ?>
+  </div>
+  <div class="card"><h2>Sales performance</h2>
+    <table class="tbl">
+      <tr><td class="muted">Win rate</td><td><b><?= $winRate === null ? '-' : $winRate . '%' ?></b><?php if ($closedN): ?> <span class="muted small">of <?= number_format($closedN) ?> closed</span><?php endif; ?></td></tr>
+      <tr><td class="muted">Deals won</td><td><b><?= number_format((int) $won['n']) ?></b> <span class="muted small"><?= money((int) $won['v']) ?></span></td></tr>
+      <tr><td class="muted">Deals lost</td><td><b><?= number_format((int) $lost['n']) ?></b></td></tr>
+      <tr><td class="muted">Average won deal</td><td><b><?= (int) $won['n'] ? money($avgWon) : '-' ?></b></td></tr>
+      <tr><td class="muted">Average days to close</td><td><b><?= $avgDays === null || $avgDays === false ? '-' : number_format((float) $avgDays, 1) ?></b></td></tr>
+    </table>
+    <?php if ($reasons): ?><div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--line)"><div class="small muted" style="margin-bottom:6px">Most common reasons deals were lost</div>
+      <?php foreach ($reasons as $r): ?><div style="display:flex;justify-content:space-between;font-size:.86rem;padding:3px 0"><span><?= h($r['r']) ?></span><span class="muted"><?= (int) $r['n'] ?></span></div><?php endforeach; ?></div><?php endif; ?>
+  </div>
   <div class="card"><h2>New contacts (6 months)</h2>
     <?php foreach ($byMonth as $m => $n) echo bar($m, $n, $maxMonth); ?>
   </div>
@@ -56,14 +98,13 @@ head('Reports', 'reports', $u);
     <?php if (!$sources): ?><p class="muted small">No contacts yet.</p><?php else: foreach ($sources as $s => $n) echo bar($s, $n, $maxSrc); endif; ?>
   </div>
   <div class="card"><h2>Pipeline by stage<?= $pipe ? ' &middot; ' . h($pipe['name']) : '' ?></h2>
-    <?php if (!$stageData): ?><p class="muted small">No pipeline yet.</p><?php else: foreach ($stageData as $s => $d) echo bar($s, $d['n'], $maxStage, $d['n'] . ' &middot; ' . money($d['v'])); endif; ?>
+    <?php if (!$stageData): ?><p class="muted small">No pipeline yet.</p><?php else: foreach ($stageData as $s => $d) echo bar((string) $s, $d['n'], $maxStage, $d['n'] . ' deal' . ($d['n'] === 1 ? '' : 's') . ', ' . money($d['v'])); endif; ?>
   </div>
   <div class="card"><h2>Email</h2>
     <table class="tbl">
       <tr><td class="muted">Campaigns sent</td><td><b><?= number_format($campSent) ?></b></td></tr>
       <tr><td class="muted">Opens tracked</td><td><b><?= number_format($campOpen) ?></b></td></tr>
       <tr><td class="muted">Open rate</td><td><b><?= $openRate ?>%</b></td></tr>
-      <tr><td class="muted">Deals won (all time)</td><td><b><?= number_format((int) $won['n']) ?> &middot; <?= money((int) $won['v']) ?></b></td></tr>
     </table>
   </div>
 </div>

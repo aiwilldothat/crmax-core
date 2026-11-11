@@ -1,0 +1,2 @@
+# Keep line endings as LF on every platform, so files are identical however the repo is checked out.
+* text=auto eol=lf

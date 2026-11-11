@@ -120,14 +120,138 @@ function contact_upsert(array $in, string $source = ''): int {
     if ($existing) {
         $data['updated_at'] = time();
         go_update('contacts', (int) $existing['id'], $data);
+        if (isset($data['company'])) contact_set_company((int) $existing['id'], $data['company']);
         return (int) $existing['id'];
     }
     if ($source !== '') $data['source'] = $source;
     $data['created_at'] = time(); $data['updated_at'] = time();
     $id = go_insert('contacts', $data);
+    if (isset($data['company'])) contact_set_company($id, $data['company']);
     act_log($id, 'contact_created', ['source' => $source]);
     wf_fire('contact_created', $id);
     return $id;
+}
+
+/* ============================================================ COMPANIES ----- */
+/** Tidy a company name: trimmed, inner whitespace collapsed, capped at 160 characters. */
+function company_clean(string $name): string { return mb_substr(trim((string) preg_replace('/\s+/', ' ', $name)), 0, 160); }
+/** The bare domain of a website or email-style value: "https://www.Acme.com/about" -> "acme.com". */
+function company_domain(string $v): string {
+    $v = mb_strtolower(trim($v));
+    if ($v === '') return '';
+    $host = (string) (parse_url(preg_match('#^[a-z][a-z0-9+.-]*://#', $v) ? $v : 'http://' . $v, PHP_URL_HOST) ?: '');
+    $host = preg_replace('/^www\./', '', $host);
+    return preg_match('/^[a-z0-9.-]+\.[a-z]{2,}$/', (string) $host) ? mb_substr((string) $host, 0, 120) : '';
+}
+/** Clean the editable company columns out of a form post, CSV row or API body (name is handled separately). */
+function company_input(array $in): array {
+    $website = mb_substr(trim((string) ($in['website'] ?? '')), 0, 200);
+    $domain = company_domain((string) ($in['domain'] ?? ''));
+    if ($domain === '' && $website !== '') $domain = company_domain($website);
+    return [
+        'website'  => $website,
+        'domain'   => $domain,
+        'phone'    => mb_substr(trim((string) ($in['phone'] ?? '')), 0, 60),
+        'address'  => mb_substr(trim((string) ($in['address'] ?? '')), 0, 300),
+        'industry' => mb_substr(trim((string) ($in['industry'] ?? '')), 0, 80),
+        'notes'    => mb_substr(trim((string) ($in['notes'] ?? '')), 0, 5000),
+    ];
+}
+/** A safe href for a website someone typed: only http(s), with the scheme added when missing. Returns '' if unusable. */
+function website_href(string $v): string {
+    $v = trim($v);
+    if ($v === '') return '';
+    if (!preg_match('#^[a-z][a-z0-9+.-]*://#i', $v)) $v = 'https://' . $v;
+    return preg_match('#^https?://[^\s<>"\']+$#i', $v) ? $v : '';
+}
+/**
+ * Find a company by name (case-insensitive) or create it. Returns its id, or 0 for an empty name.
+ * $extra holds other columns to set (website, phone...); on an existing company only non-empty values are applied.
+ */
+function company_upsert(string $name, array $extra = []): int {
+    $name = company_clean($name);
+    if ($name === '') return 0;
+    $st = db()->prepare("SELECT id FROM companies WHERE name=? COLLATE NOCASE ORDER BY id LIMIT 1"); $st->execute([$name]);
+    $id = (int) $st->fetchColumn();
+    $extra = array_filter($extra, fn($v) => $v !== '' && $v !== null);
+    unset($extra['name']);
+    if ($id) { if ($extra) go_update('companies', $id, $extra + ['updated_at' => time()]); return $id; }
+    return go_insert('companies', ['name' => $name, 'created_at' => time(), 'updated_at' => time()] + $extra);
+}
+/**
+ * Link a contact to a company by name and keep contacts.company (the text copy used by merge tags
+ * and exports) in step. An empty name unlinks. Never throws: saving a contact must not fail because
+ * of company linking - forms, imports and the API all pass through here.
+ */
+function contact_set_company(int $contactId, string $name): void {
+    try {
+        $name = company_clean($name);
+        if ($name === '') { go_update('contacts', $contactId, ['company_id' => 0, 'company' => '']); return; }
+        $coId = company_upsert($name);
+        $co = $coId ? go_get('companies', $coId) : null;
+        go_update('contacts', $contactId, ['company_id' => $coId, 'company' => (string) ($co['name'] ?? $name)]);
+    } catch (Throwable $e) { /* leave the contact as saved */ }
+}
+/** Rename a company and refresh the text copy on its contacts. */
+function company_rename(int $id, string $name): void {
+    $name = company_clean($name);
+    if ($name === '') return;
+    go_update('companies', $id, ['name' => $name, 'updated_at' => time()]);
+    db()->prepare("UPDATE contacts SET company=? WHERE company_id=?")->execute([$name, $id]);
+}
+/** Fold one company into another: its people and deals move across, then it is removed. */
+function company_merge(int $fromId, int $intoId): bool {
+    $from = go_get('companies', $fromId); $into = go_get('companies', $intoId);
+    if (!$from || !$into || $fromId === $intoId) return false;
+    $pdo = db(); $pdo->beginTransaction();
+    try {
+        $pdo->prepare("UPDATE contacts SET company_id=?, company=? WHERE company_id=?")->execute([$intoId, $into['name'], $fromId]);
+        $pdo->prepare("UPDATE deals SET company_id=? WHERE company_id=?")->execute([$intoId, $fromId]);
+        $fill = [];   // keep details the surviving company is missing
+        foreach (['domain', 'phone', 'website', 'address', 'industry'] as $k) if ((string) $into[$k] === '' && (string) $from[$k] !== '') $fill[$k] = $from[$k];
+        if ((string) $from['notes'] !== '') $fill['notes'] = trim($into['notes'] . "\n\n" . $from['notes']);
+        if ($fill) go_update('companies', $intoId, $fill + ['updated_at' => time()]);
+        go_del('companies', $fromId);
+        $pdo->commit();
+        return true;
+    } catch (Throwable $e) { if ($pdo->inTransaction()) $pdo->rollBack(); return false; }
+}
+/** Delete a company. Its people and deals stay; they are just no longer linked (the contact keeps the name as text). */
+function company_delete(int $id): void {
+    db()->prepare("UPDATE contacts SET company_id=0 WHERE company_id=?")->execute([$id]);
+    db()->prepare("UPDATE deals SET company_id=0 WHERE company_id=?")->execute([$id]);
+    go_del('companies', $id);
+}
+
+/* ============================================================ DEALS --------- */
+/** Win probability (%) for each stage of a pipeline: the saved list, or an even spread where none is saved. */
+function stage_probs(array $pipe): array {
+    $n = count(jdec($pipe['stages'] ?? '[]'));
+    $saved = jdec($pipe['stage_probs'] ?? '[]');
+    $out = [];
+    for ($i = 0; $i < $n; $i++) {
+        $v = $saved[$i] ?? null;
+        $out[] = is_numeric($v) ? max(0, min(100, (int) $v)) : (int) round(100 * ($i + 1) / ($n + 1));
+    }
+    return $out;
+}
+/** A deal's win probability: its own override, otherwise the default for the stage it is in. */
+function deal_prob(array $deal, array $probs): int {
+    if ((int) ($deal['probability'] ?? -1) >= 0) return min(100, (int) $deal['probability']);
+    if (!$probs) return 0;
+    return (int) $probs[min(max(0, (int) $deal['stage']), count($probs) - 1)];
+}
+/** Value x probability, in cents. */
+function deal_weighted(array $deal, array $probs): int { return (int) round((int) $deal['value_cents'] * deal_prob($deal, $probs) / 100); }
+/** Accept only a real YYYY-MM-DD date; anything else becomes ''. */
+function valid_date(string $d): string {
+    return preg_match('/^(\d{4})-(\d{2})-(\d{2})$/', $d, $m) && checkdate((int) $m[2], (int) $m[3], (int) $m[1]) ? $d : '';
+}
+/** Up to two initials for a person, e.g. "Dana Lee" -> "DL". */
+function initials(string $name): string {
+    $parts = preg_split('/[\s@._-]+/', trim($name), -1, PREG_SPLIT_NO_EMPTY) ?: [];
+    $s = mb_strtoupper(mb_substr($parts[0] ?? '', 0, 1) . mb_substr($parts[1] ?? '', 0, 1));
+    return $s !== '' ? $s : '?';
 }
 
 /* ============================================================ FORMS --------- */

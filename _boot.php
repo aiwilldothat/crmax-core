@@ -1,6 +1,6 @@
 <?php
 /**
- * CRMax Core — a free, self-hosted CRM.
+ * CRMax Core - a free, self-hosted CRM.
  * Single PHP + SQLite application. No framework, no Composer, no build step.
  * Point any PHP 8.1+ web server at this folder and open it in a browser: the database
  * installs itself on the first request and the first person to register becomes the admin.
@@ -18,6 +18,7 @@ declare(strict_types=1);
 $CFG = is_file(__DIR__ . '/config.php') ? (include __DIR__ . '/config.php') : [];
 if (!is_array($CFG)) $CFG = [];
 
+const APP_VERSION = '1.1.0';
 define('APP_NAME', (string) ($CFG['app_name'] ?? 'CRMax Core'));
 define('DATA_DIR', (string) ($CFG['data_dir'] ?? (__DIR__ . '/data')));
 define('DB_FILE', (string) ($CFG['db_file'] ?? (DATA_DIR . '/crm.sqlite')));
@@ -75,6 +76,11 @@ function db_migrate(PDO $pdo): void {
             address TEXT NOT NULL DEFAULT '', tags TEXT NOT NULL DEFAULT '[]', custom TEXT NOT NULL DEFAULT '{}',
             source TEXT NOT NULL DEFAULT '', owner_id INTEGER NOT NULL DEFAULT 0, dnd_email INTEGER NOT NULL DEFAULT 0,
             created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL DEFAULT 0",
+        // Companies your contacts work for. contacts.company keeps a text copy of the linked company's name.
+        'companies' => "id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL DEFAULT '', domain TEXT NOT NULL DEFAULT '',
+            phone TEXT NOT NULL DEFAULT '', website TEXT NOT NULL DEFAULT '', address TEXT NOT NULL DEFAULT '',
+            industry TEXT NOT NULL DEFAULT '', notes TEXT NOT NULL DEFAULT '', custom TEXT NOT NULL DEFAULT '{}',
+            owner_id INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL DEFAULT 0",
         'notes' => "id INTEGER PRIMARY KEY AUTOINCREMENT, contact_id INTEGER NOT NULL, user_id INTEGER NOT NULL DEFAULT 0,
             body TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL",
         'tasks' => "id INTEGER PRIMARY KEY AUTOINCREMENT, contact_id INTEGER NOT NULL DEFAULT 0, title TEXT NOT NULL DEFAULT '',
@@ -117,6 +123,63 @@ function db_migrate(PDO $pdo): void {
     $pdo->exec("CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status, due_date)");
 
     if (setting_get('app_secret') === null) setting_set('app_secret', bin2hex(random_bytes(32)));
+
+    // Versioned upgrades. The tables above are the v1.0 shape; later versions only ever add to it.
+    // A v1.0 database has no schema_version row and counts as version 1.
+    if ((int) (setting_get('schema_version') ?? '1') < 2) migrate_v2($pdo);
+}
+/**
+ * v1.1 (schema 2): company records, richer deals (expected close date, win probability, owner,
+ * notes, lost reason) and a win probability per pipeline stage. Additive only - no existing column
+ * changes. Safe to run twice, and safe when two requests arrive together: the transaction makes the
+ * second one wait, then skip.
+ */
+function migrate_v2(PDO $pdo): void {
+    $pdo->exec('BEGIN IMMEDIATE');
+    try {
+        if ((int) (setting_get('schema_version') ?? '1') >= 2) { $pdo->exec('COMMIT'); return; }
+        $add = function (string $tbl, array $cols) use ($pdo): void {
+            $have = [];
+            foreach ($pdo->query("PRAGMA table_info($tbl)")->fetchAll() as $c) $have[$c['name']] = true;
+            foreach ($cols as $col => $def) if (!isset($have[$col])) $pdo->exec("ALTER TABLE $tbl ADD COLUMN $col $def");
+        };
+        $add('contacts', ['company_id' => "INTEGER NOT NULL DEFAULT 0"]);
+        $add('deals', [
+            'company_id'  => "INTEGER NOT NULL DEFAULT 0",
+            'close_date'  => "TEXT NOT NULL DEFAULT ''",      // expected close, YYYY-MM-DD
+            'probability' => "INTEGER NOT NULL DEFAULT -1",   // 0-100, or -1 = use the stage's default
+            'owner_id'    => "INTEGER NOT NULL DEFAULT 0",
+            'closed_at'   => "INTEGER NOT NULL DEFAULT 0",    // when it was marked won or lost
+            'lost_reason' => "TEXT NOT NULL DEFAULT ''",
+            'notes'       => "TEXT NOT NULL DEFAULT ''",
+        ]);
+        $add('pipelines', ['stage_probs' => "TEXT NOT NULL DEFAULT '[]'"]);   // win % per stage, aligned to stages
+        $pdo->exec("CREATE INDEX IF NOT EXISTS idx_contacts_company ON contacts(company_id)");
+        $pdo->exec("CREATE INDEX IF NOT EXISTS idx_deals_company ON deals(company_id)");
+        $pdo->exec("CREATE INDEX IF NOT EXISTS idx_deals_close ON deals(status, close_date)");
+        $pdo->exec("CREATE INDEX IF NOT EXISTS idx_companies_name ON companies(name)");
+
+        // Backfill 1: every distinct company name already typed on a contact becomes a company record.
+        $ids = [];
+        foreach ($pdo->query("SELECT id, name FROM companies")->fetchAll() as $r) $ids[mb_strtolower(trim((string) $r['name']))] = (int) $r['id'];
+        $ins = $pdo->prepare("INSERT INTO companies (name, created_at, updated_at) VALUES (?,?,?)");
+        $upd = $pdo->prepare("UPDATE contacts SET company_id=? WHERE id=?");
+        foreach ($pdo->query("SELECT id, company FROM contacts WHERE company_id=0 AND TRIM(company)!='' ORDER BY id")->fetchAll() as $c) {
+            $name = trim((string) preg_replace('/\s+/', ' ', (string) $c['company']));
+            $key = mb_strtolower($name);
+            if (!isset($ids[$key])) { $ins->execute([$name, time(), time()]); $ids[$key] = (int) $pdo->lastInsertId(); }
+            $upd->execute([$ids[$key], (int) $c['id']]);
+        }
+        // Backfill 2: deals already won or lost get a closed time (their last change); deals take their contact's company.
+        $pdo->exec("UPDATE deals SET closed_at = CASE WHEN updated_at>0 THEN updated_at ELSE created_at END WHERE status IN ('won','lost') AND closed_at=0");
+        $pdo->exec("UPDATE deals SET company_id = COALESCE((SELECT c.company_id FROM contacts c WHERE c.id=deals.contact_id), 0) WHERE company_id=0 AND contact_id>0");
+
+        setting_set('schema_version', '2');
+        $pdo->exec('COMMIT');
+    } catch (Throwable $e) {
+        $pdo->exec('ROLLBACK');
+        throw $e;
+    }
 }
 
 /* --------------------------------------------------------------- settings -- */

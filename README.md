@@ -9,12 +9,13 @@ Composer, no build step, no monthly fee. Point a web server at it and open it in
 ## Features
 
 - **Contacts** - searchable, taggable, CSV import/export, notes, activity timeline
-- **Pipeline** - drag-and-drop deal kanban with custom stages, won/lost, pipeline value
+- **Companies** - a record for each organisation with its people, deals and combined activity; type a company on a contact and it is created and linked for you; merge duplicates
+- **Pipeline** - drag-and-drop deal board with custom stages; each deal has an expected close date, win probability, company, contact, owner and notes; won/lost with a reason; reopen closed deals
 - **Tasks** - a single to-do list across every contact, with due dates
 - **Forms** - build lead-capture forms, share a link or embed them, submissions become contacts
 - **Campaigns** - send email to all contacts or a tagged segment, with open tracking and one-click unsubscribe
 - **Workflows** - automate follow-ups: when a contact is created or a form is submitted, wait / email / tag / create a task
-- **Reports** - contacts over time, lead sources, pipeline by stage, email performance
+- **Reports** - sales forecast (pipeline weighted by win probability, by expected close month), win rate, average deal size and days to close, contacts over time, lead sources, pipeline by stage, email performance
 - **Team** - invite colleagues, admin and member roles
 - **REST API** - a simple JSON API for integrations
 
@@ -94,9 +95,36 @@ curl -H "Authorization: Bearer <token>" https://your-crm/api.php/me
 curl -X POST https://your-crm/api.php/contacts \
   -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
   -d '{"first_name":"Dana","email":"dana@example.com","tags":["web"],"source":"api"}'
+
+# create a deal, then mark it won
+curl -X POST https://your-crm/api.php/deals \
+  -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
+  -d '{"name":"Website rebuild","value":4800,"company":"Acme Pty Ltd","close_date":"2027-03-31"}'
+curl -X POST https://your-crm/api.php/deals/12 \
+  -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
+  -d '{"status":"won"}'
 ```
 
-Endpoints: `GET /me`, `GET /contacts`, `GET /contacts/{id}`, `POST /contacts`, `GET /deals`.
+| Endpoint | What it does |
+|---|---|
+| `GET /me` | Organisation name, app version and counts |
+| `GET /contacts`, `GET /contacts/{id}` | List (`?q=`, `?limit=`) or fetch contacts |
+| `POST /contacts` | Create or update a contact (matched by email); `company` links or creates the company |
+| `GET /companies`, `GET /companies/{id}` | List (`?q=`, `?limit=`) or fetch companies |
+| `POST /companies` | Create or update a company (matched by name) |
+| `GET /deals`, `GET /deals/{id}` | List deals (`?status=open\|won\|lost\|all`, open by default) or fetch one |
+| `POST /deals` | Create a deal: `name`, plus optional `value`, `stage`, `pipeline_id`, `contact_id`, `company` or `company_id`, `close_date`, `probability`, `owner_id`, `notes` |
+| `POST /deals/{id}` | Update a deal - only the fields you send change. `status` takes `open`, `won` or `lost` |
+| `GET /pipelines` | Pipelines with their stages and each stage's win probability |
+
+## Upgrading
+
+Replace the application files with the new version and keep your `data/` folder. The database upgrades
+itself the first time the app is opened - upgrades only ever add tables and columns, so nothing you
+have is changed or removed. Copy `data/crm.sqlite` somewhere safe first, as you would before any upgrade.
+
+Upgrading from 1.0 to 1.1 turns every company name already typed on a contact into a company record
+and links the contacts to it.
 
 ## Backups
 

@@ -7,6 +7,7 @@ function svg_icon(string $n, int $size = 19): string {
     $p = [
         'dash'      => '<path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h5v-6h4v6h5V9.5"/>',
         'contacts'  => '<path d="M16 20v-1.5a3.5 3.5 0 0 0-3.5-3.5h-5A3.5 3.5 0 0 0 4 18.5V20"/><circle cx="10" cy="8" r="3.5"/><path d="M20 20v-1.4a3.5 3.5 0 0 0-2.7-3.4"/><path d="M15.5 4.6a3.5 3.5 0 0 1 0 6.8"/>',
+        'companies' => '<path d="M4 21V6.5A1.5 1.5 0 0 1 5.5 5h7A1.5 1.5 0 0 1 14 6.5V21"/><path d="M14 10h4.5A1.5 1.5 0 0 1 20 11.5V21"/><path d="M2.5 21h19"/><path d="M7.5 9h3M7.5 12.5h3M7.5 16h3"/>',
         'pipelines' => '<rect x="3" y="4" width="5" height="16" rx="1.2"/><rect x="9.5" y="4" width="5" height="10" rx="1.2"/><rect x="16" y="4" width="5" height="13" rx="1.2"/>',
         'tasks'     => '<rect x="3.5" y="3.5" width="17" height="17" rx="2.6"/><path d="m8.3 12.2 2.6 2.6 5-5.4"/>',
         'campaigns' => '<path d="M4 10.5v3l11 4.5V6L4 10.5z"/><path d="M4 10.5H3a1 1 0 0 0-1 1v1a1 1 0 0 0 1 1h1"/><path d="M7 15v2.3A1.7 1.7 0 0 0 10.3 18l-.3-1.4"/><path d="M18.5 9a3.2 3.2 0 0 1 0 6"/>',
@@ -110,6 +111,7 @@ function head(string $title, string $active = '', ?array $u = null): void {
     $nav = [
         'dash'      => ['index.php', 'dash', 'Dashboard'],
         'contacts'  => ['contacts.php', 'contacts', 'Contacts'],
+        'companies' => ['companies.php', 'companies', 'Companies'],
         'pipelines' => ['pipelines.php', 'pipelines', 'Pipeline'],
         'tasks'     => ['tasks.php', 'tasks', 'Tasks'],
         'campaigns' => ['campaigns.php', 'campaigns', 'Campaigns'],
