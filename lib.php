@@ -189,22 +189,18 @@ function contact_upsert_info(array $in, string $source = '', array $opts = []): 
     }
     return ['id' => $id, 'created' => true, 'owner_id' => $owner, 'assigned' => $owner > 0, 'notified' => $sent];
 }
-/** Delete a contact with its notes, tasks, activity, form submissions and workflow runs. Its deals are kept, unlinked. */
+/**
+ * Delete a contact with its notes, tasks, activity, form submissions and workflow runs. Its deals are
+ * kept, unlinked. Add-ons hear about it (contact_deleted) just before the contact's own record goes.
+ * Returns false when there was no such contact.
+ */
 function contact_delete(int $id): bool {
     if ($id <= 0 || !go_get('contacts', $id)) return false;
     foreach (['notes', 'tasks', 'activities', 'form_submissions', 'wf_enrollments'] as $tbl) db()->prepare("DELETE FROM $tbl WHERE contact_id=?")->execute([$id]);
     db()->prepare("UPDATE deals SET contact_id=0 WHERE contact_id=?")->execute([$id]);
+    addon_hook('contact_deleted', $id);
     go_del('contacts', $id);
     return true;
-}
-/**
- * Delete several contacts as one all-or-nothing change, then tell add-ons about each one that went
- * (the contact_deleted hook, outside the transaction). Returns how many were deleted.
- */
-function contacts_delete(array $ids): int {
-    $gone = db_tx(function () use ($ids) { $gone = []; foreach ($ids as $id) if (contact_delete((int) $id)) $gone[] = (int) $id; return $gone; });
-    foreach ($gone as $id) addon_hook('contact_deleted', $id);
-    return count($gone);
 }
 /**
  * Add tags to a contact, leaving alone the ones it already has. Each tag that is new to the contact

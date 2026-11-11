@@ -16,9 +16,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if ($body !== '') { go_insert('notes', ['contact_id' => $id, 'user_id' => (int) $u['id'], 'body' => $body, 'created_at' => time()]); act_log($id, 'note_added', []); flash_set('Note added.'); }
         redirect('contact.php?id=' . $id);
     }
+    if ($do === 'owner') {   // the owner picker in Details
+        $to = posted_user('owner_id', (int) $c['owner_id']);
+        if (contact_assign($id, $to, $u)) flash_set($to ? 'Owner changed to ' . user_label(user_by_id($to)) . '.' : 'This contact is now unassigned.');
+        redirect('contact.php?id=' . $id);
+    }
     if ($do === 'task') {
         $title = trim((string) ($_POST['title'] ?? ''));
-        if ($title !== '') { go_insert('tasks', ['contact_id' => $id, 'title' => $title, 'due_date' => (string) ($_POST['due_date'] ?? ''), 'status' => 'open', 'assigned_to' => (int) $u['id'], 'created_at' => time()]); flash_set('Task added.'); }
+        if ($title !== '') { task_add($title, (string) ($_POST['due_date'] ?? ''), $id, posted_user('assigned_to', (int) $u['id']), $u); flash_set('Task added.'); }
+        redirect('contact.php?id=' . $id);
+    }
+    if ($do === 'task_assign') {   // the assignee badge on a task
+        $t = go_get('tasks', (int) ($_POST['task_id'] ?? 0));
+        if ($t && (int) $t['contact_id'] === $id) {
+            $to = posted_user('assigned_to', (int) $t['assigned_to']);
+            if (task_assign((int) $t['id'], $to, $u)) flash_set($to ? 'Task assigned to ' . user_label(user_by_id($to)) . '.' : 'Task is now unassigned.');
+        }
         redirect('contact.php?id=' . $id);
     }
     if ($do === 'task_done') { go_update('tasks', (int) ($_POST['task_id'] ?? 0), ['status' => 'done']); redirect('contact.php?id=' . $id); }
@@ -40,6 +53,7 @@ $tasks = db()->prepare("SELECT * FROM tasks WHERE contact_id=? ORDER BY status, 
 $acts  = db()->prepare("SELECT * FROM activities WHERE contact_id=? ORDER BY id DESC LIMIT 40"); $acts->execute([$id]); $acts = $acts->fetchAll();
 $deals = db()->prepare("SELECT d.*, p.name pname, p.stages FROM deals d LEFT JOIN pipelines p ON p.id=d.pipeline_id WHERE d.contact_id=? ORDER BY d.id DESC"); $deals->execute([$id]); $deals = $deals->fetchAll();
 $actLabel = ['contact_created' => 'Created', 'form_submitted' => 'Submitted a form', 'workflow_email' => 'Workflow email', 'email_sent' => 'Email sent', 'note_added' => 'Note added', 'deal_created' => 'Deal created', 'deal_won' => 'Deal won', 'deal_lost' => 'Deal lost'];
+$team = team_map();
 
 head(contact_name($c), 'contacts', $u);
 ?>
@@ -58,6 +72,8 @@ head(contact_name($c), 'contacts', $u);
       <?php if ($c['phone']): ?><tr><td class="muted">Phone</td><td><?= h($c['phone']) ?></td></tr><?php endif; ?>
       <?php if ($c['address']): ?><tr><td class="muted">Address</td><td><?= h($c['address']) ?></td></tr><?php endif; ?>
       <?php if ($c['source']): ?><tr><td class="muted">Source</td><td><?= h($c['source']) ?></td></tr><?php endif; ?>
+      <tr><td class="muted">Owner</td><td><form method="post" style="display:flex;gap:6px;align-items:center"><?= csrf_field() ?><input type="hidden" name="do" value="owner">
+        <select name="owner_id" aria-label="Owner" onchange="this.form.submit()" style="width:auto;max-width:100%;padding:6px 10px"><?= user_options((int) $c['owner_id']) ?></select><noscript><button class="btn ghost sm">Save</button></noscript></form></td></tr>
       <tr><td class="muted">Added</td><td><?= h(date('j M Y', (int) $c['created_at'])) ?></td></tr>
     </table>
   </div>
@@ -83,12 +99,14 @@ head(contact_name($c), 'contacts', $u);
  <div>
   <div class="card"><h2>Tasks</h2>
     <form method="post" style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap"><?= csrf_field() ?><input type="hidden" name="do" value="task">
-      <input name="title" placeholder="Add a task..." required style="flex:1;min-width:140px"><input type="date" name="due_date" style="width:auto"><button class="btn sm">Add</button></form>
+      <input name="title" placeholder="Add a task..." required style="flex:1;min-width:140px"><input type="date" name="due_date" style="width:auto">
+      <select name="assigned_to" aria-label="Assign the task to" title="Assign the task to" style="width:auto;max-width:150px"><?= user_options((int) $u['id']) ?></select><button class="btn sm">Add</button></form>
     <?php if (!$tasks): ?><p class="muted small">No tasks yet.</p>
     <?php else: foreach ($tasks as $t): $done = $t['status'] === 'done'; $overdue = !$done && $t['due_date'] !== '' && $t['due_date'] < date('Y-m-d'); ?>
       <div style="display:flex;align-items:center;gap:10px;padding:6px 0;border-bottom:1px solid var(--line)">
         <?php if (!$done): ?><form method="post" style="display:inline"><?= csrf_field() ?><input type="hidden" name="do" value="task_done"><input type="hidden" name="task_id" value="<?= (int) $t['id'] ?>"><button class="btn ghost sm" style="padding:3px 8px" title="Mark done">&#10003;</button></form><?php else: ?><span style="color:var(--ok)">&#10003;</span><?php endif; ?>
         <span style="flex:1<?= $done ? ';text-decoration:line-through;color:var(--muted)' : '' ?>"><?= h($t['title']) ?></span>
+        <?= $done ? who_chip((int) $t['assigned_to'], $team, 'Assigned to') : who_button((int) $t['assigned_to'], $team, ['do' => 'task_assign', 'task_id' => (int) $t['id']], 'assigned_to') ?>
         <?php if ($t['due_date']): ?><span class="tag <?= $overdue ? 'bad' : '' ?>"><?= h($t['due_date']) ?></span><?php endif; ?>
       </div>
     <?php endforeach; endif; ?>
@@ -104,4 +122,5 @@ head(contact_name($c), 'contacts', $u);
   </div>
  </div>
 </div>
+<?= pick_user_js() ?>
 <?php foot();
