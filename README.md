@@ -210,6 +210,10 @@ Upgrading from 1.1.0 to 1.1.1 changes no data. Check these things afterwards:
   tag step. Look over any active ones before you upgrade, because they start enrolling contacts.
 - Updating a contact through the API without a `tags` field, or importing a CSV without a tags column,
   no longer clears the contact's tags.
+- After someone submits a public form, they now see its thank-you message, or go to its redirect address.
+  In 1.1.0 they got the empty form again, although the submission was saved.
+- Campaigns sent to a tag, and the contacts list filtered by a tag, now find tags containing `_`, `%` or
+  accented letters. In 1.1.0 such a campaign reached nobody, and the list filter could also show similar tags.
 - New and optional: add-ons (see Add-ons), and the `currency`, `currency_symbol` and `allow_install`
   settings in `config.php`. Nothing changes unless you use them.
 

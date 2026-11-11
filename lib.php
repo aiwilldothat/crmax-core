@@ -399,11 +399,24 @@ function email_wrap(string $inner, array $opts = []): string {
 function segment_contacts(array $seg): array {
     $type = (string) ($seg['type'] ?? 'all');
     if ($type === 'tag' && ($seg['tag'] ?? '') !== '') {
-        $st = db()->prepare("SELECT * FROM contacts WHERE email!='' AND dnd_email=0 AND tags LIKE ?");
-        $st->execute(['%"' . str_replace(['%', '_'], ['\%', '\_'], (string) $seg['tag']) . '"%']);
+        [$cond, $params] = tag_sql((string) $seg['tag']);
+        $st = db()->prepare("SELECT * FROM contacts WHERE email!='' AND dnd_email=0 AND $cond");
+        $st->execute($params);
         return $st->fetchAll();
     }
     return db()->query("SELECT * FROM contacts WHERE email!='' AND dnd_email=0")->fetchAll();
+}
+/**
+ * SQL condition (and its parameters) for "the contact has this tag", for contacts.tags (a JSON list).
+ * It looks for the tag as a whole JSON string, so % and _ in a tag are plain characters, and it matches
+ * a non-ASCII tag both as stored (\u-escaped) and as plain UTF-8. Like before, ASCII letters match in any case.
+ */
+function tag_sql(string $tag): array {
+    $like = fn(string $s): string => '%' . str_replace(['\\', '%', '_'], ['\\\\', '\\%', '\\_'], $s) . '%';
+    return ["(tags LIKE ? ESCAPE '\\' OR tags LIKE ? ESCAPE '\\')", [
+        $like((string) json_encode($tag, JSON_UNESCAPED_SLASHES)),
+        $like((string) json_encode($tag, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)),
+    ]];
 }
 /** Materialise recipients for a campaign that is being sent. */
 function camp_queue(int $campaignId): int {

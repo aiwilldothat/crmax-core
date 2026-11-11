@@ -88,7 +88,7 @@ if (isset($_GET['new']) || $edit) {
 $q = trim((string) ($_GET['q'] ?? '')); $tag = trim((string) ($_GET['tag'] ?? ''));
 $where = []; $params = [];
 if ($q !== '') { $where[] = "(first_name LIKE ? OR last_name LIKE ? OR email LIKE ? OR company LIKE ? OR phone LIKE ?)"; $like = '%' . $q . '%'; array_push($params, $like, $like, $like, $like, $like); }
-if ($tag !== '') { $where[] = "tags LIKE ?"; $params[] = '%"' . $tag . '"%'; }
+if ($tag !== '') { [$cond, $tp] = tag_sql($tag); $where[] = $cond; array_push($params, ...$tp); }
 $rows = go_all('contacts', implode(' AND ', $where), $params, 'updated_at DESC, id DESC', 500);
 $allTags = [];
 foreach (db()->query("SELECT tags FROM contacts WHERE tags!='[]'") as $r) foreach (jdec($r['tags']) as $tg) $allTags[$tg] = ($allTags[$tg] ?? 0) + 1;

@@ -448,6 +448,22 @@ try {
     check('send_mail replies go to the sending account by default', (mail_to($mail, 'r2@example.test')['headers']['reply-to'] ?? '') === 'crm@example.test');
     $m = mail_to($mail, 'r3@example.test');
     check('a Reply-To that would add a header of its own is left out', $m !== [] && !isset($m['headers']['reply-to']) && !isset($m['headers']['bcc']));
+
+    section('Public forms');
+    $c->post('/forms.php', ['do' => 'save', 'id' => 0, 'name' => 'Contact us', 'thankyou' => 'Thanks, talk soon.', 'redirect' => '',
+        'fld_label' => ['Email', 'First name'], 'fld_name' => ['email', 'first_name'], 'fld_type' => ['email', 'text'], 'fld_req' => ['1', '']]);
+    $fid = (int) one($dir, "SELECT id FROM forms WHERE slug='contact-us'");
+    $visitor = new Client($base, $dir . DS . 'visitor-jar.txt');
+    $r = $visitor->post('/f.php?s=contact-us', ['f_email' => 'lea@example.test', 'f_first_name' => 'Lea'], false);
+    check('a visitor who submits a form sees the thank-you message', $r['code'] === 200 && str_contains($r['body'], 'Thanks, talk soon.') && !str_contains($r['body'], 'name="f_email"'), 'HTTP ' . $r['code']);
+    check('... without PHP warnings on the page', !preg_match('/(Warning|Notice|Deprecated|Fatal error)<\/b>:|Uncaught /', $r['body']));
+    check('the submission becomes a contact and a form submission', one($dir, "SELECT first_name FROM contacts WHERE email='lea@example.test'") === 'Lea' && (int) one($dir, "SELECT COUNT(*) FROM form_submissions WHERE form_id=?", [$fid]) === 1);
+    $r = $visitor->post('/f.php?s=contact-us', ['f_email' => 'not-an-email', 'f_first_name' => 'X'], false);
+    check('an invalid email shows the error and the form again, and saves nothing', str_contains($r['body'], 'Please enter a valid email address.') && str_contains($r['body'], 'name="f_email"') && (int) one($dir, "SELECT COUNT(*) FROM form_submissions WHERE form_id=?", [$fid]) === 1);
+    $c->post('/forms.php', ['do' => 'save', 'id' => $fid, 'name' => 'Contact us', 'thankyou' => 'Thanks, talk soon.', 'redirect' => 'https://example.test/thanks',
+        'fld_label' => ['Email'], 'fld_name' => ['email'], 'fld_type' => ['email'], 'fld_req' => ['1']]);
+    $r = $visitor->post('/f.php?s=contact-us', ['f_email' => 'max@example.test'], false);
+    check('a form with a redirect sends the visitor there after submitting', $r['code'] === 302 && $r['location'] === 'https://example.test/thanks', 'HTTP ' . $r['code'] . ' ' . $r['location']);
     stop($srv);
 
     /* ============================================ C. tag-added workflows === */
@@ -600,6 +616,24 @@ try {
     }
     $o = run_php($adir . DS . 'cron.php');
     check('cron runs with an add-on installed', str_contains($o, 'workflows_processed=0'), $o);
+
+    section('Tag matching (campaign audiences and the contacts filter)');
+    $cafe = html_entity_decode('caf&eacute;', ENT_QUOTES, 'UTF-8');   // a tag with a non-ASCII letter
+    foreach ([['Under', 'vip_2026'], ['Decoy', 'vipx2026'], ['Percent', '50%off'], ['Wild', '50xyzoff'], ['Accent', $cafe], ['Plain', 'cafe']] as [$fn, $tg]) {
+        $a->post('/contacts.php', ['do' => 'save', 'id' => 0, 'first_name' => $fn, 'email' => strtolower($fn) . '@example.test', 'tags' => $tg]);
+    }
+    $want = ['vip_2026' => ['under@example.test'], 'VIP_2026' => ['under@example.test'], '50%off' => ['percent@example.test'],
+        $cafe => ['accent@example.test'], 'cafe' => ['plain@example.test']];
+    file_put_contents($adir . DS . 'seg.php', "<?php require __DIR__ . '/lib.php'; \$out = [];\n"
+        . 'foreach (' . var_export(array_keys($want), true) . " as \$t) \$out[\$t] = array_column(segment_contacts(['type' => 'tag', 'tag' => \$t]), 'email');\n"
+        . 'echo json_encode($out);');
+    $o = run_php($adir . DS . 'seg.php');
+    $got = json_decode($o, true) ?: [];
+    foreach ($want as $tg => $emails) check("a campaign to tag \"" . ($tg === $cafe ? 'cafe (accented)' : $tg) . '" reaches exactly the contacts with it', ($got[$tg] ?? null) === $emails, $o);
+    $r = $a->get('/contacts.php?tag=' . rawurlencode($cafe));
+    check('the contacts list filters by an accented tag', str_contains($r['body'], 'Accent') && !str_contains($r['body'], '>Plain<') && !str_contains($r['body'], 'Plain</'));
+    $r = $a->get('/contacts.php?tag=' . rawurlencode('vip_2026'));
+    check('the contacts list treats _ in a tag as a plain character', str_contains($r['body'], 'Under') && !str_contains($r['body'], 'Decoy'));
     stop($asrv);
 
     /* ================================================== B. upgrade from 1.0 === */

@@ -15,7 +15,8 @@ $done = false; $err = '';
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!rl_hit('formsubmit', 3600, 40)) { $err = 'Too many submissions, please try again later.'; }
     else {
-        [$ok, $err] = array_pad(form_handle_submit($form, $_POST), 2, '');
+        $res = form_handle_submit($form, $_POST);   // ['ok' => bool, 'err' => string, 'contact_id' => int]
+        $ok = (bool) ($res['ok'] ?? false); $err = (string) ($res['err'] ?? '');
         if ($ok) {
             if (($form['redirect'] ?? '') !== '' && preg_match('#^https?://#', $form['redirect'])) { header('Location: ' . $form['redirect']); exit; }
             $done = true;
