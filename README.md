@@ -18,6 +18,8 @@ Composer, no build step, no monthly fee. Point a web server at it and open it in
 - **Workflows** - automate follow-ups: when a contact is created, a form is submitted or a tag is added, wait / email / tag / create a task
 - **Reports** - sales forecast (pipeline weighted by win probability, by expected close month), win rate, average deal size and days to close, contacts over time, lead sources, pipeline by stage, email performance
 - **Team** - invite colleagues, admin and member roles; removing someone hands what they own to whoever you choose
+- **Two-factor sign-in** - a code from an authenticator app as well as the password, with recovery codes; optional per person, or required for the whole team
+- **Audit log** - who signed in, what changed in security, the team and the settings, and who exported, deleted, bulk-changed or re-assigned records; kept for 12 months
 - **REST API** - a simple JSON API for integrations
 - **Add-ons** - add your own menu items, cards and rules without editing its files
 
@@ -106,6 +108,84 @@ Deleting asks first.
 **Removing a team member** (Settings -> Team) asks who takes over their contacts, companies, deals and
 tasks, or lets you leave them unassigned. They also come out of the lead routing rule.
 
+## Two-factor sign-in
+
+With two-factor sign-in a password is not enough on its own: signing in also takes a 6-digit code from
+an authenticator app on the person's phone. Any app that does time-based codes works - Google
+Authenticator, Microsoft Authenticator, Authy, most password managers.
+
+**Turning it on.** Everyone does this for their own account: **Settings -> Your account -> Set up
+two-factor sign-in** (members find it under **Account** in the menu). Scan the QR code with the app,
+type the code it shows, and it is on. The QR code is drawn by the CRM itself, so the secret in it never
+leaves your server.
+
+**Recovery codes.** Turning it on shows ten recovery codes, once. Each signs you in one time when the
+phone is not to hand. Keep them somewhere that is not that phone. The account page shows how many are
+left and makes new ones (the old ones then stop working).
+
+**Signing in** asks for the password, then the code. Until the code is accepted nothing in the CRM opens.
+A code works once, codes from the 30 seconds either side are accepted in case the phone's clock is a
+little out, and wrong codes are counted: six from one address, or eight against one account, lock the
+code step for ten minutes.
+
+**A new phone.** The account page sets it up again from the start. The old phone keeps working until
+the new one is confirmed.
+
+**Requiring it** (Settings -> Security, admins only). Tick "Require two-factor sign-in for everyone" and
+anyone who has not set it up is taken to the set-up page the next time they open the CRM, and can use
+nothing else until it is done. You need it on your own account first. While it is required, nobody can
+turn theirs off. The API token is not a sign-in and is not affected.
+
+**When someone is locked out.**
+
+- They lost their phone but have a recovery code: they sign in with it and set up the new phone.
+- They have neither: an admin clicks **Reset two-factor** next to their name in Settings -> Team. They
+  are signed out everywhere and sign in with their password alone (and set it up again, if it is required).
+- Nobody can do that - the only admin is the one locked out, or forgot their password: run this on the
+  server, in the CRM's folder.
+
+```bash
+php recover.php                          # lists the accounts
+php recover.php 2fa-off you@example.com  # turns two-factor sign-in off for that account
+php recover.php password you@example.com # gives it a new random password, printed once
+```
+
+`recover.php` only runs from the command line (a browser gets "not found"). Whoever can run commands on
+the server can already read the whole database, so it opens nothing new. What it does is written to the
+audit log as "Command line".
+
+**Other sessions.** Your account page has **Sign out my other sessions**: every other browser and device
+signed in as you is signed out, and this one stays. Changing your password, and turning two-factor
+sign-in on or off, do the same.
+
+How the secret is kept: each person's authenticator secret is stored sealed, with a key made from a
+secret that lives in the same database, and recovery codes are stored only as hashes. That keeps them
+out of sight in an export or a table viewed by accident. It does not protect them from someone who has
+the whole `data/crm.sqlite` file - so keep `data/` private and treat backups of it as you would passwords.
+
+## Audit log
+
+**Settings -> Security -> Open the audit log** (admins only) lists what was done, by whom, when and from
+which address, newest first:
+
+- sign-ins, failed sign-ins (with the address that was typed) and sign-outs;
+- password changes, every two-factor change, the API token being regenerated;
+- team members added and removed, and what happened to the records of someone removed;
+- changes to the organization, lead routing, email accounts and AI settings - that they changed, never
+  a password or a key;
+- every delete, with what was deleted; companies merged;
+- bulk assign, bulk tag and bulk delete; CSV imports and exports, with the number of rows;
+- every change of owner or assignee, with who had it before; campaigns sent.
+
+Changes made through the API are recorded as "API", and what `recover.php` does as "Command line".
+Filter by kind, person, date or words, and download what the filter shows as CSV.
+
+The log cannot be edited or cleared in the app. Lines are kept for 12 months and then removed, by
+`cron.php` or the next time the log is opened. It records addresses (IP) and the email address typed at
+a failed sign-in, so tell your team it exists if your local rules ask for that.
+
+The log starts when you install or upgrade to 1.3: nothing is made up about what happened before.
+
 ## Background jobs (cron)
 
 Workflows and campaign sending run from a scheduled task. Add one line to cron to run every minute:
@@ -151,7 +231,8 @@ Amounts show as `$1,234.00 USD`. In `config.php`, `'currency' => 'AUD'` changes 
 ## AI (optional, bring your own key)
 
 In **Settings -> AI**, paste your own Anthropic API key to enable AI email drafting. No key is included
-and nothing calls out unless you add one.
+and nothing calls out unless you add one. A saved key shows as a row of stars: leave them to keep it,
+type over them to replace it, or tick **Remove the saved key**.
 
 ## REST API
 
@@ -231,6 +312,11 @@ only ones you trust.
 An event's return value is ignored. Strings returned by HTML hooks are printed as they are, so escape what
 you output with `h()`. A filter receives the value first and returns it, changed or not. Deleting several
 contacts at once from the list calls `contact_deleted` once for each of them, inside that one delete.
+`password_changed` also runs when `recover.php` resets a password from the server.
+
+An add-on can write its own lines to the audit log with `audit('my_sync', 'Sent 12 invoices to the
+accounts system')`: a short code for what happened, then one plain sentence. Never put a password, a
+key or a token in it.
 
 ## Upgrading
 
@@ -283,6 +369,26 @@ constant named `CURRENCY_SYMBOL`. The amounts stored in the database were always
 servers were not affected, and macOS, BSD and Alpine Linux should not have been, as PHP has no such
 constant there. The `currency_symbol` setting in `config.php` keeps its name.
 
+Upgrading to 1.3 adds what two-factor sign-in needs to each account, and the audit log. Nothing existing
+changes: nobody is signed out by the upgrade, every account starts with two-factor sign-in off, and
+passwords work as before. What to know afterwards:
+
+- There are four new files: `twofa.php`, `audit.php`, `qr.php` and `recover.php`. Upload all of them.
+- Two-factor sign-in is there for anyone who wants it (Settings -> Your account) and is not required
+  until an admin says so under Settings -> Security.
+- Members now have an **Account** link in the menu, for their password, two-factor sign-in and sessions.
+  Until 1.3 only admins had a link to that page.
+- Changing your password now signs out your other sessions.
+- The audit log starts empty and records from the upgrade on.
+- Someone signed out elsewhere, or after two weeks away, could meet "Bad request (CSRF)" on their first
+  try at signing in again. That is fixed.
+- Settings -> AI: saving the form with the stars still in the key field used to store the stars as the
+  key, and an empty field removed it. Now the stars (or an empty field) keep the key and a tick box
+  removes it. If AI drafting stopped working after you saved that form, paste your key in again.
+- The contact and company CSV files are written and read as plain CSV: a backslash is just a
+  backslash. On PHP 8.4 the old way could put a warning line inside an exported file.
+- API: nothing changes. Every field 1.0 to 1.2 returned is still there with the same meaning.
+
 ## Backups
 
 Everything lives in `data/crm.sqlite`. Copy that file to back up; replace it to restore. (Because SQLite
@@ -293,6 +399,10 @@ runs in WAL mode, copy `crm.sqlite`, `crm.sqlite-wal` and `crm.sqlite-shm` toget
 - Keep `data/` out of the web root, or rely on the bundled `data/.htaccess` / the nginx rule above.
 - Always run behind HTTPS in production (session cookies are marked secure automatically over HTTPS).
 - CSRF protection, login rate limiting, and HTML sanitisation of saved content are built in.
+- Turn on two-factor sign-in, at least for admins, and consider requiring it (see Two-factor sign-in).
+- The audit log shows who signed in and what was changed, exported or deleted (see Audit log).
+- A backup of `data/crm.sqlite` holds everything, including what two-factor sign-in relies on. Store
+  backups as carefully as the live file.
 
 ## Need more?
 
