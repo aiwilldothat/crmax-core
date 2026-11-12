@@ -21,8 +21,9 @@ if (!$installed) {
         elseif (strlen($pass) < 8) $err = 'Choose a password of at least 8 characters.';
         elseif (user_count() > 0) $err = 'This CRM is already set up.';
         else {
-            go_insert('users', ['email' => $email, 'pass_hash' => password_hash($pass, PASSWORD_DEFAULT), 'name' => $name, 'role' => 'admin', 'status' => 'active', 'created_at' => time()]);
+            $firstId = go_insert('users', ['email' => $email, 'pass_hash' => password_hash($pass, PASSWORD_DEFAULT), 'name' => $name, 'role' => 'admin', 'status' => 'active', 'created_at' => time()]);
             org_set(['name' => $org !== '' ? $org : 'My Company', 'timezone' => date_default_timezone_get()]);
+            audit('user_added', 'Set-up: the first account, an admin (' . $email . ')', 'users', $firstId, $name !== '' ? $name : $email);
             do_login($email, $pass);
             flash_set('Welcome to ' . APP_NAME . '. Your CRM is ready.');
             redirect('index.php');
@@ -42,17 +43,42 @@ if (!$installed) {
 }
 
 /* ------------------------------------------------------------------ login -- */
+// Two steps for an account with two-factor sign-in: the password, then a code. Between the two the
+// session only remembers who is signing in (login_pending()); it is not signed in and opens nothing.
 $u = current_user();
 if (!$u || isset($_GET['login'])) {
     $err = '';
+    if (isset($_GET['cancel'])) { login_cancel(); redirect('index.php?login=1'); }   // "Use a different account"
     if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         post_guard();
         $lock = login_locked_secs();
         if ($lock > 0) $err = 'Too many attempts. Try again in ' . ceil($lock / 60) . ' minute(s).';
-        elseif (do_login((string) ($_POST['email'] ?? ''), (string) ($_POST['password'] ?? ''))) { login_clear(); redirect('index.php'); }
+        elseif (isset($_POST['code'])) {   // step 2
+            $waiting = login_pending() !== null;
+            $err = login_finish((string) $_POST['code']);
+            if ($err === '') { login_clear(); redirect('index.php'); }
+            if ($waiting) login_fail();   // a wrong code counts as a failed attempt; a sign-in that had simply timed out does not
+        }
+        elseif (do_login((string) ($_POST['email'] ?? ''), (string) ($_POST['password'] ?? ''))) {
+            // The count of wrong attempts from this address is only wiped by a complete sign-in. Wiping it
+            // after the password alone would hand out unlimited guesses at the code.
+            if (login_pending()) redirect('index.php?login=1');
+            login_clear(); redirect('index.php');
+        }
         else { login_fail(); $err = 'Incorrect email or password.'; }
     }
+    $pending = login_pending();
     pub_head('Sign in');
+    if ($pending) {
+        echo '<div class="pcard"><h1>Enter your code</h1><p class="pmuted">Open your authenticator app and type the 6-digit code for ' . h(org_name()) . '.</p>';
+        if ($err) echo '<div class="flash err" style="margin-top:12px">' . h($err) . '</div>';
+        echo '<form method="post" action="' . h(url('index.php?login=1')) . '" style="margin-top:12px">' . csrf_field()
+            . '<label for="code">Code</label><input id="code" name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="20" required autofocus>'
+            . '<button class="pbtn" style="margin-top:16px">Verify</button></form>'
+            . '<p class="pmuted" style="margin-top:14px;font-size:.84rem">No phone to hand? Type one of your recovery codes instead.</p>'
+            . '<p style="margin-top:8px;font-size:.84rem"><a href="' . h(url('index.php?login=1&cancel=1')) . '">Use a different account</a></p></div>';
+        pub_foot(); exit;
+    }
     echo '<div class="pcard"><h1>Sign in</h1><p class="pmuted">Welcome back to ' . h(org_name()) . '.</p>';
     if ($err) echo '<div class="flash err" style="margin-top:12px">' . h($err) . '</div>';
     echo '<form method="post" style="margin-top:12px">' . csrf_field()
@@ -61,6 +87,7 @@ if (!$u || isset($_GET['login'])) {
         . '<button class="pbtn" style="margin-top:16px">Sign in</button></form></div>';
     pub_foot(); exit;
 }
+twofa_gate($u);   // two-factor sign-in is compulsory and this person has not set it up yet: straight to the set-up page
 
 /* -------------------------------------------------------------- dashboard -- */
 // The numbers and both lists follow the "whose records" filter: everyone's by default, or one person's.

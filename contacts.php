@@ -10,11 +10,17 @@ if (isset($_GET['export'])) {
     header('Content-Disposition: attachment; filename="contacts-' . date('Ymd') . '.csv"');
     $team = team_map();
     $out = fopen('php://output', 'w');
-    fputcsv($out, ['first_name', 'last_name', 'email', 'phone', 'company', 'address', 'tags', 'source', 'created', 'owner']);
-    foreach (db()->query("SELECT * FROM contacts ORDER BY id") as $c) {
-        fputcsv($out, [csv_safe($c['first_name']), csv_safe($c['last_name']), csv_safe($c['email']), csv_safe($c['phone']), csv_safe($c['company']), csv_safe($c['address']), csv_safe(implode(', ', jdec($c['tags']))), csv_safe($c['source']), date('Y-m-d', (int) $c['created_at']), csv_safe($team[(int) $c['owner_id']] ?? '')]);
+    // Every fputcsv / fgetcsv argument is spelled out: PHP 8.4 reports a call that leaves the last one to its default.
+    fputcsv($out, ['first_name', 'last_name', 'email', 'phone', 'company', 'address', 'tags', 'source', 'created', 'owner'], ',', '"', '');
+    $st = db()->query("SELECT * FROM contacts ORDER BY id"); $n = 0;
+    foreach ($st as $c) {
+        fputcsv($out, [csv_safe($c['first_name']), csv_safe($c['last_name']), csv_safe($c['email']), csv_safe($c['phone']), csv_safe($c['company']), csv_safe($c['address']), csv_safe(implode(', ', jdec($c['tags']))), csv_safe($c['source']), date('Y-m-d', (int) $c['created_at']), csv_safe($team[(int) $c['owner_id']] ?? '')], ',', '"', '');
+        $n++;
     }
-    fclose($out); exit;
+    $st = null;   // the read is finished before the log line is written
+    fclose($out);
+    audit('export', 'Exported ' . $n . ' contact' . ($n === 1 ? '' : 's') . ' as CSV', 'contacts');
+    exit;
 }
 
 /* ---------- writes ---------- */
@@ -38,7 +44,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if ($existing) {
             go_update('contacts', $id, $data + ['owner_id' => $owner]); contact_set_company($id, $data['company']);
             wf_fire_tags_added($id, jdec($existing['tags']), jdec($data['tags']));
-            if ($owner !== (int) $existing['owner_id']) notify_assigned('contact', $owner, $u, go_get('contacts', $id) ?? $existing);
+            if ($owner !== (int) $existing['owner_id']) {
+                audit('owner_changed', 'Owner of ' . audit_record('contacts', $existing) . ': ' . audit_who((int) $existing['owner_id']) . ' -> ' . audit_who($owner), 'contacts', $id);
+                notify_assigned('contact', $owner, $u, go_get('contacts', $id) ?? $existing);
+            }
             flash_set('Contact updated.');
         } else {
             $data['created_at'] = time(); $data['owner_id'] = $owner;
@@ -77,13 +86,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $tags = array_slice(array_values(array_unique(array_filter(array_map(fn($t) => mb_substr(trim($t), 0, 60), explode(',', (string) ($_POST['newtag'] ?? '')))))), 0, 10);
             if (!$tags) { flash_set('Type the tag to add.', 'err'); redirect($back); }
             $n = (int) db_tx(function () use ($ids, $tags) { $n = 0; foreach ($ids as $id) if (contact_add_tags($id, $tags) > 0) $n++; return $n; });
+            if ($n > 0) audit('bulk_tag', 'Tagged ' . $count($n) . ' "' . implode('", "', $tags) . '" in one go', 'contacts');
             flash_set($n === 0 ? 'Those contacts already have that tag.' : 'Tag added to ' . $count($n) . '.');
             redirect($back);
         }
         if ($what === 'delete') {
             // The list asks "are you sure?" and only then sets this flag, so a delete cannot go through unconfirmed.
             if (($_POST['confirm'] ?? '') !== 'yes') { flash_set('Nothing was deleted. Deleting contacts has to be confirmed first.', 'err'); redirect($back); }
+            // Each contact gets its own "Deleted" line in the audit log (from go_del()), and this one says it was one action.
             $n = (int) db_tx(function () use ($ids) { $n = 0; foreach ($ids as $id) if (contact_delete($id)) $n++; return $n; });
+            if ($n > 0) audit('bulk_delete', 'Deleted ' . $count($n) . ' in one go', 'contacts');
             flash_set($count($n) . ' deleted.');
             redirect($back);
         }
@@ -98,7 +110,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if ((string) $us['name'] !== '') $people[mb_strtolower((string) $us['name'])] ??= (int) $us['id'];
         }
         $given = [];   // user id => how many contacts this import gave them: one summary email each, not one per contact
-        while (($row = fgetcsv($fh)) !== false) {
+        while (($row = fgetcsv($fh, null, ',', '"', '')) !== false) {
             if ($head === null) { $head = array_map(fn($h) => strtolower(trim((string) $h)), $row); continue; }
             $r = @array_combine($head, array_pad($row, count($head), '')); if (!$r) continue;
             $in = [
@@ -116,6 +128,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
         fclose($fh);
         foreach ($given as $uid => $howMany) notify_assigned('contacts', (int) $uid, $u, [], ['count' => $howMany, 'why' => 'import']);
+        audit('import', 'Imported ' . $n . ' row' . ($n === 1 ? '' : 's') . ' of contacts from the CSV file "' . mb_substr(basename((string) ($_FILES['csv']['name'] ?? '')), 0, 80) . '"', 'contacts');
         flash_set("Imported $n row(s)."); redirect('contacts.php');
     }
 }

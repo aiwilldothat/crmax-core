@@ -20,6 +20,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if ($data['subject'] === '' || $data['body'] === '') { flash_set('Add a subject and body first.', 'err'); redirect('campaigns.php?edit=' . $id); }
             $n = camp_queue($id);
             go_update('campaigns', $id, ['status' => 'sending', 'scheduled_at' => time()]);
+            audit('campaign_sent', 'Sent the campaign "' . $data['name'] . '" to ' . $n . ' recipient' . ($n === 1 ? '' : 's') . ($segType === 'tag' ? ' tagged "' . $seg['tag'] . '"' : ' (all contacts)'), 'campaigns', $id);
             flash_set("Sending to $n recipient(s). Delivery runs in the background" . (DEV ? ' (running now).' : ' via cron.'));
             if (DEV) camp_run_due(500);
             redirect('campaigns.php?edit=' . $id);

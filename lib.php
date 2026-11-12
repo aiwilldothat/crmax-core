@@ -169,6 +169,7 @@ function contact_upsert_info(array $in, string $source = '', array $opts = []): 
         if (isset($data['company'])) contact_set_company($id, $data['company']);
         if (isset($data['tags'])) wf_fire_tags_added($id, jdec($existing['tags']), jdec($data['tags']));
         $assigned = $owner > 0 && $owner !== (int) $existing['owner_id'];
+        if ($owner !== (int) $existing['owner_id']) audit('owner_changed', 'Owner of ' . audit_record('contacts', $existing) . ': ' . audit_who((int) $existing['owner_id']) . ' -> ' . audit_who($owner), 'contacts', $id);
         $sent = $notify && $assigned ? notify_assigned('contact', $owner, $actor, go_get('contacts', $id) ?? $existing) : '';
         return ['id' => $id, 'created' => false, 'owner_id' => $owner, 'assigned' => $assigned, 'notified' => $sent];
     }
@@ -297,7 +298,8 @@ function company_merge(int $fromId, int $intoId): bool {
         foreach (['domain', 'phone', 'website', 'address', 'industry'] as $k) if ((string) $into[$k] === '' && (string) $from[$k] !== '') $fill[$k] = $from[$k];
         if ((string) $from['notes'] !== '') $fill['notes'] = trim($into['notes'] . "\n\n" . $from['notes']);
         if ($fill) go_update('companies', $intoId, $fill + ['updated_at' => time()]);
-        go_del('companies', $fromId);
+        go_del('companies', $fromId, false);
+        audit('merge', 'Merged the company "' . $from['name'] . '" into "' . $into['name'] . '"', 'companies', $intoId);
         $pdo->commit();
         return true;
     } catch (Throwable $e) { if ($pdo->inTransaction()) $pdo->rollBack(); return false; }
@@ -385,6 +387,7 @@ function contact_assign(int $contactId, int $ownerId, ?array $actor = null): boo
     $c = go_get('contacts', $contactId);
     if (!$c || (int) $c['owner_id'] === $ownerId) return false;
     go_update('contacts', $contactId, ['owner_id' => $ownerId, 'updated_at' => time()]);
+    audit('owner_changed', 'Owner of ' . audit_record('contacts', $c) . ': ' . audit_who((int) $c['owner_id']) . ' -> ' . audit_who($ownerId), 'contacts', $contactId);
     notify_assigned('contact', $ownerId, $actor, $c);
     return true;
 }
@@ -404,7 +407,10 @@ function contacts_assign(array $ids, int $ownerId, ?array $actor = null): int {
         }
         return $n;
     });
-    if ($changed > 0) notify_assigned('contacts', $ownerId, $actor, [], ['count' => $changed]);
+    if ($changed > 0) {
+        audit('bulk_assign', $changed . ' contact' . ($changed === 1 ? '' : 's') . ' ' . ($ownerId ? 'assigned to ' . audit_who($ownerId) : 'made unassigned') . ' in one go', 'contacts');
+        notify_assigned('contacts', $ownerId, $actor, [], ['count' => $changed]);
+    }
     return $changed;
 }
 /** Add a task and email its assignee (unless they added it themselves). Returns the new task's id. */
@@ -419,6 +425,7 @@ function task_assign(int $taskId, int $userId, ?array $actor = null): bool {
     $t = go_get('tasks', $taskId);
     if (!$t || (int) $t['assigned_to'] === $userId) return false;
     go_update('tasks', $taskId, ['assigned_to' => $userId]);
+    audit('owner_changed', 'Assignee of ' . audit_record('tasks', $t) . ': ' . audit_who((int) $t['assigned_to']) . ' -> ' . audit_who($userId), 'tasks', $taskId);
     if ($t['status'] === 'open') notify_assigned('task', $userId, $actor, $t);
     return true;
 }
@@ -452,7 +459,8 @@ function user_remove(int $userId, int $inheritId): array {
             if (($mode === 'fixed' && !$fixed) || ($mode === 'round_robin' && !$people)) $mode = 'none';
             lead_routing_set($mode, $fixed, $people);
         }
-        go_del('users', $userId);
+        go_del('users', $userId, false);   // the caller logs the removal, with who took over what
+        twofa_clear($userId);
     });
     return $counts;
 }
@@ -823,5 +831,9 @@ function ai_complete(string $prompt, int $maxTokens = 900): string {
 }
 
 /* ============================================================ REST API key -- */
-function api_token(): string { $t = (string) setting_get('api_token', ''); if ($t === '') { $t = 'crm_' . token(); setting_set('api_token', $t); } return $t; }
+function api_token(): string {
+    $t = (string) setting_get('api_token', '');
+    if ($t === '') { $t = 'crm_' . token(); setting_set('api_token', $t); audit('api_token', 'The API token was created'); }   // the first time Settings is opened
+    return $t;
+}
 function api_token_reset(): string { $t = 'crm_' . token(); setting_set('api_token', $t); return $t; }

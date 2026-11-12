@@ -19,7 +19,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if ($name !== $co['name']) company_rename($id, $name);
         $owner = (int) ($_POST['owner_id'] ?? 0); if ($owner && !user_by_id($owner)) $owner = 0;
         go_update('companies', $id, company_input($_POST) + ['owner_id' => $owner, 'updated_at' => time()]);
-        if ($owner !== (int) $co['owner_id']) notify_assigned('company', $owner, $u, go_get('companies', $id) ?? $co);   // tell the new owner
+        if ($owner !== (int) $co['owner_id']) {
+            audit('owner_changed', 'Owner of ' . audit_record('companies', $co) . ': ' . audit_who((int) $co['owner_id']) . ' -> ' . audit_who($owner), 'companies', $id);
+            notify_assigned('company', $owner, $u, go_get('companies', $id) ?? $co);   // tell the new owner
+        }
         flash_set('Company updated.');
         redirect('company.php?id=' . $id);
     }

@@ -54,7 +54,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         ];
         if ($existing) {
             go_update('deals', $id, $data);
-            if ($owner !== (int) $existing['owner_id']) notify_assigned('deal', $owner, $u, go_get('deals', $id) ?? []);   // tell the new owner
+            if ($owner !== (int) $existing['owner_id']) {
+                audit('owner_changed', 'Owner of ' . audit_record('deals', $existing) . ': ' . audit_who((int) $existing['owner_id']) . ' -> ' . audit_who($owner), 'deals', $id);
+                notify_assigned('deal', $owner, $u, go_get('deals', $id) ?? []);   // tell the new owner
+            }
             flash_set('Deal updated.');
         } else {
             $newId = go_insert('deals', $data + ['pipeline_id' => $pid, 'status' => 'open', 'created_at' => time()]);

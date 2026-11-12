@@ -18,7 +18,7 @@ declare(strict_types=1);
 $CFG = is_file(__DIR__ . '/config.php') ? (include __DIR__ . '/config.php') : [];
 if (!is_array($CFG)) $CFG = [];
 
-const APP_VERSION = '1.2.1';
+const APP_VERSION = '1.3.0';
 define('APP_NAME', (string) ($CFG['app_name'] ?? 'CRMax Core'));
 define('DATA_DIR', (string) ($CFG['data_dir'] ?? (__DIR__ . '/data')));
 define('DB_FILE', (string) ($CFG['db_file'] ?? (DATA_DIR . '/crm.sqlite')));
@@ -141,6 +141,12 @@ function db_migrate(PDO $pdo): void {
             ctx TEXT NOT NULL DEFAULT '{}', created_at INTEGER NOT NULL",
         'templates' => "id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL DEFAULT '', subject TEXT NOT NULL DEFAULT '',
             body TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL",
+        // Who did what, and from where (see audit()). Lines are only ever added, and pruned after 12 months.
+        // user_id is the signed-in person (0 for the API, the command line, or a sign-in that failed);
+        // actor is their name as it was at the time, so the line still reads right after they have left.
+        'audit_log' => "id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL DEFAULT 0, actor TEXT NOT NULL DEFAULT '',
+            action TEXT NOT NULL DEFAULT '', entity TEXT NOT NULL DEFAULT '', entity_id INTEGER NOT NULL DEFAULT 0,
+            summary TEXT NOT NULL DEFAULT '', ip TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL",
     ];
     foreach ($t as $name => $cols) $pdo->exec("CREATE TABLE IF NOT EXISTS $name ($cols)");
     $pdo->exec("CREATE INDEX IF NOT EXISTS idx_contacts_upd ON contacts(updated_at)");
@@ -156,6 +162,7 @@ function db_migrate(PDO $pdo): void {
     // A v1.0 database has no schema_version row and counts as version 1.
     if ((int) (setting_get('schema_version') ?? '1') < 2) migrate_v2($pdo);
     if ((int) (setting_get('schema_version') ?? '1') < 3) migrate_v3($pdo);
+    if ((int) (setting_get('schema_version') ?? '1') < 4) migrate_v4($pdo);
 }
 /**
  * v1.1 (schema 2): company records, richer deals (expected close date, win probability, owner,
@@ -242,6 +249,37 @@ function migrate_v3(PDO $pdo): void {
         throw $e;
     }
 }
+/**
+ * v1.3 (schema 4): two-factor sign-in and the audit log. Each user gains what two-factor sign-in needs
+ * (the authenticator secret, whether it is on, the last code used, the recovery codes) and a session
+ * version, which "Sign out my other sessions" moves on. The audit_log table itself is created with the
+ * other tables above; this adds its indexes. Nothing existing changes: every account starts with
+ * two-factor off, and sessions that were open before the upgrade stay signed in. Additive, safe to run
+ * twice, safe under two requests at once.
+ */
+function migrate_v4(PDO $pdo): void {
+    $pdo->exec('BEGIN IMMEDIATE');
+    try {
+        if ((int) (setting_get('schema_version') ?? '1') >= 4) { $pdo->exec('COMMIT'); return; }
+        $have = [];
+        foreach ($pdo->query("PRAGMA table_info(users)")->fetchAll() as $c) $have[$c['name']] = true;
+        foreach ([
+            'totp_secret'     => "TEXT NOT NULL DEFAULT ''",      // the authenticator secret, sealed (see secret_seal())
+            'totp_enabled'    => "INTEGER NOT NULL DEFAULT 0",
+            'totp_last_step'  => "INTEGER NOT NULL DEFAULT 0",    // the 30-second step of the last code accepted: a code works once
+            'recovery_codes'  => "TEXT NOT NULL DEFAULT '[]'",    // hashes of the unused recovery codes
+            'session_version' => "INTEGER NOT NULL DEFAULT 0",    // a session signed in under an earlier number is no longer accepted
+        ] as $col => $def) if (!isset($have[$col])) $pdo->exec("ALTER TABLE users ADD COLUMN $col $def");
+        $pdo->exec("CREATE INDEX IF NOT EXISTS idx_audit_time ON audit_log(created_at)");
+        $pdo->exec("CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_log(action, id)");
+
+        setting_set('schema_version', '4');
+        $pdo->exec('COMMIT');
+    } catch (Throwable $e) {
+        $pdo->exec('ROLLBACK');
+        throw $e;
+    }
+}
 
 /* --------------------------------------------------------------- settings -- */
 function setting_get(string $k, ?string $default = null): ?string {
@@ -314,26 +352,87 @@ function current_user(): ?array {
     if (($_SESSION['seen'] ?? 0) < time() - SESSION_IDLE) { do_logout(); return null; }
     $u = user_by_id((int) $_SESSION['uid']);
     if (!$u || $u['status'] !== 'active') { do_logout(); return null; }
+    // "Sign out my other sessions", a new password and a two-factor change all move the person's session
+    // version on. A session that signed in under an earlier number is over.
+    if ((int) ($_SESSION['sv'] ?? 0) !== (int) $u['session_version']) { do_logout(); flash_set('You were signed out of this session. Sign in again to carry on.', 'err'); return null; }
     $_SESSION['seen'] = time();
+    audit_as($u);
     addon_hook('authed', $u);
     return $u;
 }
+/**
+ * Check an email address and password. True when they are right - and then the session is either signed
+ * in, or, for an account with two-factor sign-in, only waiting: it remembers who gave the right
+ * password (login_pending()) and nothing in the app opens until login_finish() has accepted a code.
+ */
 function do_login(string $email, string $pass): bool {
+    $typed = mb_substr(mb_strtolower(trim($email)), 0, 120);
     $u = user_by_email($email);
-    if (!$u) { password_hash($pass, PASSWORD_DEFAULT); return false; }   // constant-ish time
-    if (!password_verify($pass, $u['pass_hash']) || $u['status'] !== 'active') return false;
+    if (!$u) { password_hash($pass, PASSWORD_DEFAULT); audit('login_failed', 'Wrong email or password', '', 0, $typed); return false; }   // constant-ish time
+    if (!password_verify($pass, $u['pass_hash']) || $u['status'] !== 'active') { audit('login_failed', 'Wrong email or password', 'users', (int) $u['id'], $typed); return false; }
     sess_start(); session_regenerate_id(true);
-    $_SESSION['uid'] = (int) $u['id']; $_SESSION['seen'] = time();
-    db()->prepare("UPDATE users SET last_login=? WHERE id=?")->execute([time(), $u['id']]);
+    unset($_SESSION['uid'], $_SESSION['pending_uid'], $_SESSION['pending_at']);
+    if ((int) $u['totp_enabled'] === 1) { $_SESSION['pending_uid'] = (int) $u['id']; $_SESSION['pending_at'] = time(); return true; }
+    session_sign_in($u);
+    audit('login', 'Signed in', 'users', (int) $u['id'], $u);
     return true;
 }
-function do_logout(): void {
-    sess_start(); $_SESSION = [];
-    if (ini_get('session.use_cookies')) { $p = session_get_cookie_params();
-        setcookie(session_name(), '', time() - 42000, $p['path'], $p['domain'] ?? '', $p['secure'], $p['httponly']); }
-    session_destroy();
+/** Make this session $u's: the last step of every sign-in. */
+function session_sign_in(array $u): void {
+    unset($_SESSION['pending_uid'], $_SESSION['pending_at']);
+    $_SESSION['uid'] = (int) $u['id']; $_SESSION['seen'] = time(); $_SESSION['sv'] = (int) $u['session_version'];
+    db()->prepare("UPDATE users SET last_login=? WHERE id=?")->execute([time(), (int) $u['id']]);
 }
-function require_login(): array { $u = current_user(); if (!$u) redirect('index.php?login=1'); return $u; }
+/** The person who has given the right password and still owes a two-factor code, or null. They have 10 minutes. */
+function login_pending(): ?array {
+    sess_start();
+    if (empty($_SESSION['pending_uid'])) return null;
+    $u = (int) ($_SESSION['pending_at'] ?? 0) > time() - 600 ? user_by_id((int) $_SESSION['pending_uid']) : null;
+    if (!$u || $u['status'] !== 'active' || (int) $u['totp_enabled'] !== 1) { unset($_SESSION['pending_uid'], $_SESSION['pending_at']); return null; }
+    return $u;
+}
+/** Give up a sign-in that is waiting for its code. */
+function login_cancel(): void { sess_start(); unset($_SESSION['pending_uid'], $_SESSION['pending_at']); }
+/**
+ * The second step of a two-factor sign-in: $code is the six digits from the authenticator app, or one
+ * of the person's recovery codes. Returns '' when the session is now signed in, otherwise what to tell them.
+ */
+function login_finish(string $code): string {
+    $u = login_pending();
+    if (!$u) return 'That sign-in timed out. Enter your email and password again.';
+    $uid = (int) $u['id'];
+    if (twofa_locked_secs($uid) > 0) return 'Too many wrong codes. Try again in a few minutes.';
+    $how = twofa_check($u, $code);
+    if ($how === '') {
+        twofa_fail($uid);
+        audit('login_failed', 'Wrong two-factor code', 'users', $uid, mb_strtolower((string) $u['email']));
+        return 'That code is not right. Codes change every 30 seconds and each one works once.';
+    }
+    twofa_clear($uid);
+    session_regenerate_id(true);
+    $u = user_by_id($uid) ?? $u;
+    session_sign_in($u);
+    if ($how === 'recovery') {
+        $left = count(jdec($u['recovery_codes']));
+        audit('login', 'Signed in with a recovery code (' . $left . ' left)', 'users', $uid, $u);
+        flash_set('You signed in with a recovery code. ' . ($left === 0 ? 'That was your last one' : 'You have ' . $left . ' left') . ': make new ones under Settings, Two-factor sign-in.', $left <= 2 ? 'err' : 'ok');
+    } else {
+        audit('login', 'Signed in with a two-factor code', 'users', $uid, $u);
+    }
+    return '';
+}
+/**
+ * End the session: everything in it is dropped and its id is thrown away. The browser is handed a new,
+ * empty session straight away rather than none at all, because the sign-in form is often drawn later in
+ * the same request (someone signed out elsewhere opens the dashboard) and needs a session to keep its
+ * CSRF token in. Until 1.3 that form could not be submitted: "Bad request (CSRF)".
+ */
+function do_logout(): void {
+    sess_start();
+    $_SESSION = [];
+    session_regenerate_id(true);
+}
+function require_login(): array { $u = current_user(); if (!$u) redirect('index.php?login=1'); twofa_gate($u); return $u; }
 function require_admin(): array { $u = require_login(); if (!is_admin($u)) { http_response_code(403); pub_head('Access denied'); echo '<div class="pcard" style="text-align:center"><h1>Access denied</h1><p class="pmuted">This area is for administrators.</p><p style="margin-top:14px"><a class="pbtn" href="' . h(url('index.php')) . '">Back to dashboard</a></p></div>'; pub_foot(); exit; } return $u; }
 
 /* ---------------------------------------------------------------- csrf ------ */
@@ -357,6 +456,241 @@ function rl_hit(string $key, int $window, int $max): bool {
     $d = array_values(array_filter($d, fn($t) => $t > time() - $window));
     if (count($d) >= $max) return false;
     $d[] = time(); @file_put_contents($f, json_encode($d), LOCK_EX); return true;
+}
+
+/* ------------------------------------------------------- two-factor sign-in -- */
+// Two-factor sign-in uses the time-based codes every authenticator app speaks (TOTP, RFC 6238: HMAC-SHA1,
+// a new six-digit code every 30 seconds), in plain PHP. Each person turns it on for their own account
+// (twofa.php); an admin can require it for everyone and can reset somebody else's. Someone locked out of
+// the only admin account gets back in from the server with recover.php.
+
+/** Base32 (RFC 4648, no padding): how an authenticator secret is written down. */
+function b32_encode(string $bin): string {
+    if ($bin === '') return '';
+    $abc = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'; $bits = ''; $out = '';
+    foreach (str_split($bin) as $ch) $bits .= str_pad(decbin(ord($ch)), 8, '0', STR_PAD_LEFT);
+    foreach (str_split($bits, 5) as $chunk) $out .= $abc[(int) bindec(str_pad($chunk, 5, '0'))];
+    return $out;
+}
+function b32_decode(string $s): string {
+    $s = strtoupper((string) preg_replace('/[^A-Za-z2-7]/', '', $s));
+    if ($s === '') return '';
+    $abc = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'; $bits = ''; $out = '';
+    foreach (str_split($s) as $ch) $bits .= str_pad(decbin((int) strpos($abc, $ch)), 5, '0', STR_PAD_LEFT);
+    foreach (str_split($bits, 8) as $byte) if (strlen($byte) === 8) $out .= chr((int) bindec($byte));
+    return $out;
+}
+/** The six-digit code for a secret (raw bytes) at one 30-second step, where step = floor(unix time / 30). */
+function totp_at(string $secret, int $step): string {
+    $h = hash_hmac('sha1', pack('N2', ($step >> 32) & 0xFFFFFFFF, $step & 0xFFFFFFFF), $secret, true);
+    $o = ord($h[19]) & 0x0F;
+    $n = ((ord($h[$o]) & 0x7F) << 24) | (ord($h[$o + 1]) << 16) | (ord($h[$o + 2]) << 8) | ord($h[$o + 3]);
+    return str_pad((string) ($n % 1000000), 6, '0', STR_PAD_LEFT);
+}
+/**
+ * The step a six-digit code belongs to, or 0 when it is wrong. The current step and the ones either
+ * side are accepted, so a clock that is half a minute out still works. Only steps after $after count:
+ * that is what makes a code good for one use.
+ */
+function totp_match(string $secret, string $code, int $after = 0): int {
+    $now = intdiv(time(), 30); $hit = 0;
+    foreach ([$now - 1, $now, $now + 1] as $s) if (hash_equals(totp_at($secret, $s), $code) && $s > $after && !$hit) $hit = $s;
+    return $hit;
+}
+/**
+ * Seal a short secret for storage, and open it again. The key comes from this install's app secret.
+ * Be clear about what that gives you: the app secret lives in the same database, so this keeps an
+ * authenticator secret out of sight in a table dump, an export or a support screenshot - it does not
+ * protect it from someone who has the whole database file. Keep data/ private and backed up securely.
+ * (An HMAC-SHA256 keystream with a random nonce, and an HMAC over the result: no PHP extension needed.)
+ */
+function secret_key(string $use): string { return hash_hmac('sha256', 'crmax-core:' . $use, app_secret(), true); }
+function secret_stream(string $nonce, int $len): string {
+    $out = '';
+    for ($i = 0; strlen($out) < $len; $i++) $out .= hash_hmac('sha256', $nonce . pack('N', $i), secret_key('seal'), true);
+    return substr($out, 0, $len);
+}
+function secret_seal(string $plain): string {
+    $nonce = random_bytes(16);
+    $ct = $plain ^ secret_stream($nonce, strlen($plain));
+    return 'v1.' . base64_encode($nonce . $ct . substr(hash_hmac('sha256', $nonce . $ct, secret_key('seal-check'), true), 0, 16));
+}
+function secret_open(string $sealed): string {
+    $raw = str_starts_with($sealed, 'v1.') ? base64_decode(substr($sealed, 3), true) : false;
+    if ($raw === false || strlen($raw) < 33) return '';
+    $nonce = substr($raw, 0, 16); $ct = substr($raw, 16, -16);
+    if (!hash_equals(substr(hash_hmac('sha256', $nonce . $ct, secret_key('seal-check'), true), 0, 16), substr($raw, -16))) return '';
+    return $ct ^ secret_stream($nonce, strlen($ct));
+}
+/** A user's authenticator secret as raw bytes, or '' when they have none (or it cannot be opened). */
+function totp_secret_of(array $u): string { return (string) ($u['totp_secret'] ?? '') !== '' ? secret_open((string) $u['totp_secret']) : ''; }
+/** The address an authenticator app reads from the QR code: who it is for, the secret, and how the codes are made. */
+function totp_uri(string $secretB32, string $account): string {
+    $issuer = trim(str_replace(':', ' ', org_name())) ?: 'CRM';
+    return 'otpauth://totp/' . rawurlencode($issuer . ':' . $account) . '?secret=' . $secretB32 . '&issuer=' . rawurlencode($issuer) . '&algorithm=SHA1&digits=6&period=30';
+}
+/** $n fresh recovery codes, like "k7m2p-x9q4r": for signing in when the phone is not to hand. Each works once. */
+function recovery_codes_new(int $n = 10): array {
+    $abc = 'abcdefghjkmnpqrstuvwxyz23456789'; $out = [];   // no i, l, o, 0 or 1: nothing to misread
+    for ($k = 0; $k < $n; $k++) {
+        $c = '';
+        for ($i = 0; $i < 10; $i++) $c .= $abc[random_int(0, strlen($abc) - 1)];
+        $out[] = substr($c, 0, 5) . '-' . substr($c, 5);
+    }
+    return $out;
+}
+function recovery_normalize(string $code): string { return (string) preg_replace('/[^a-z0-9]/', '', strtolower($code)); }
+/** What is stored for a recovery code: a keyed hash, never the code itself. */
+function recovery_hash(string $code): string { return hash_hmac('sha256', recovery_normalize($code), secret_key('recovery')); }
+/**
+ * Check what someone typed at the second step against their account, and use it up: 'totp' for a good
+ * authenticator code, 'recovery' for a good recovery code, '' when it is neither. Each is taken with a
+ * compare-and-swap, so the same code cannot pass twice even when two requests arrive together.
+ */
+function twofa_check(array $u, string $typed): string {
+    $uid = (int) $u['id'];
+    $digits = (string) preg_replace('/\s+/', '', $typed);
+    if (preg_match('/^\d{6}$/', $digits)) {
+        $secret = totp_secret_of($u);
+        $step = $secret !== '' ? totp_match($secret, $digits, (int) $u['totp_last_step']) : 0;
+        if (!$step) return '';
+        $st = db()->prepare("UPDATE users SET totp_last_step=? WHERE id=? AND totp_last_step<?");
+        $st->execute([$step, $uid, $step]);
+        return $st->rowCount() === 1 ? 'totp' : '';
+    }
+    $code = recovery_normalize($typed);
+    if (strlen($code) !== 10) return '';
+    $left = jdec($u['recovery_codes']); $hash = recovery_hash($code);
+    foreach ($left as $i => $h) {
+        if (!is_string($h) || !hash_equals($h, $hash)) continue;
+        unset($left[$i]);
+        $st = db()->prepare("UPDATE users SET recovery_codes=? WHERE id=? AND recovery_codes=?");
+        $st->execute([json_encode(array_values($left)), $uid, (string) $u['recovery_codes']]);
+        return $st->rowCount() === 1 ? 'recovery' : '';
+    }
+    return '';
+}
+/** Turn two-factor sign-in on for a user, with the secret (raw bytes) they have just proved their app holds. Returns their recovery codes, to show once. */
+function twofa_enable(int $uid, string $secret, int $step): array {
+    $codes = recovery_codes_new();
+    db()->prepare("UPDATE users SET totp_secret=?, totp_enabled=1, totp_last_step=?, recovery_codes=? WHERE id=?")
+        ->execute([secret_seal($secret), $step, json_encode(array_map('recovery_hash', $codes)), $uid]);
+    sessions_revoke($uid);
+    return $codes;
+}
+/** Turn it off and forget the secret and the recovery codes. */
+function twofa_disable(int $uid): void {
+    db()->prepare("UPDATE users SET totp_secret='', totp_enabled=0, totp_last_step=0, recovery_codes='[]' WHERE id=?")->execute([$uid]);
+    twofa_clear($uid);
+    sessions_revoke($uid);
+}
+/** Replace a user's recovery codes. Returns the new ones, to show once; the old ones stop working. */
+function recovery_codes_reset(int $uid): array {
+    $codes = recovery_codes_new();
+    db()->prepare("UPDATE users SET recovery_codes=? WHERE id=?")->execute([json_encode(array_map('recovery_hash', $codes)), $uid]);
+    return $codes;
+}
+/** Whether an admin has made two-factor sign-in compulsory for the whole team (Settings > Security). */
+function twofa_required(): bool { return setting_get('require_2fa', '0') === '1'; }
+function twofa_must_enrol(array $u): bool { return (int) ($u['totp_enabled'] ?? 0) !== 1 && twofa_required(); }
+/**
+ * While two-factor sign-in is compulsory, someone who has not set it up is sent to the set-up page
+ * whatever they open. Only page views are turned away: a form they were in the middle of still saves.
+ */
+function twofa_gate(array $u): void {
+    if (defined('CRMAX_TWOFA_PAGE') || PHP_SAPI === 'cli' || ($_SERVER['REQUEST_METHOD'] ?? 'GET') !== 'GET') return;
+    if (twofa_must_enrol($u)) redirect('twofa.php');
+}
+// Wrong codes are counted per person as well as per address (login_fail()), so guessing from many
+// addresses at once gets nowhere: 8 wrong codes lock the second step for that person for 10 minutes.
+function twofa_throttle_file(int $uid): string { return DATA_DIR . '/rl_2fa_' . $uid . '.json'; }
+function twofa_locked_secs(int $uid): int {
+    $f = twofa_throttle_file($uid); if (!is_file($f)) return 0;
+    $d = array_values(array_filter(json_decode((string) file_get_contents($f), true) ?: [], fn($t) => $t > time() - LOGIN_LOCK_SECS));
+    return count($d) >= 8 ? LOGIN_LOCK_SECS - (time() - min($d)) : 0;
+}
+function twofa_fail(int $uid): void {
+    $f = twofa_throttle_file($uid);
+    $d = is_file($f) ? (json_decode((string) file_get_contents($f), true) ?: []) : [];
+    $d[] = time();
+    @file_put_contents($f, json_encode(array_slice(array_values(array_filter($d, fn($t) => $t > time() - LOGIN_LOCK_SECS)), -20)), LOCK_EX);
+}
+function twofa_clear(int $uid): void { @unlink(twofa_throttle_file($uid)); }
+/**
+ * Sign a person out everywhere, by moving their session version on. The session making this request
+ * stays signed in when it is theirs (so "Sign out my other sessions" keeps this one), unless $keepThis is false.
+ */
+function sessions_revoke(int $uid, bool $keepThis = true): void {
+    db()->prepare("UPDATE users SET session_version=session_version+1 WHERE id=?")->execute([$uid]);
+    if (!$keepThis || PHP_SAPI === 'cli') return;
+    sess_start();
+    if ((int) ($_SESSION['uid'] ?? 0) === $uid && ($u = user_by_id($uid))) $_SESSION['sv'] = (int) $u['session_version'];
+}
+
+/* -------------------------------------------------------------- audit log -- */
+/** Say who is acting for the rest of this request: a user (their row), or a label such as 'API'. current_user() does this for a signed-in person. */
+function audit_as($who): void {
+    $GLOBALS['AUDIT_ACTOR'] = is_array($who) ? ['id' => (int) ($who['id'] ?? 0), 'label' => user_label($who)] : ['id' => 0, 'label' => (string) $who];
+}
+/**
+ * Add a line to the audit log (Settings > Security > Audit log): who did what, to what, from where.
+ * $action is a short code ('login', 'delete', 'owner_changed'...; audit_actions() lists them), $summary
+ * one plain sentence, $entity and $entityId the record it is about, if any. $who names the actor for
+ * this one line - a user row, or a label such as the address typed at a failed sign-in - instead of the
+ * person signed in. It never throws: nothing may fail because its log line could not be written.
+ * Never put a password, a code, a key or a token in $summary.
+ */
+function audit(string $action, string $summary = '', string $entity = '', int $entityId = 0, $who = null): void {
+    try {
+        if ($who !== null) $a = is_array($who) ? ['id' => (int) ($who['id'] ?? 0), 'label' => user_label($who)] : ['id' => 0, 'label' => (string) $who];
+        else $a = $GLOBALS['AUDIT_ACTOR'] ?? ['id' => 0, 'label' => PHP_SAPI === 'cli' ? 'Command line' : ''];
+        $clean = fn(string $s, int $n): string => mb_substr(trim((string) preg_replace('/\s+/', ' ', $s)), 0, $n);
+        db()->prepare("INSERT INTO audit_log (user_id, actor, action, entity, entity_id, summary, ip, created_at) VALUES (?,?,?,?,?,?,?,?)")
+            ->execute([$a['id'], $clean($a['label'], 120), $clean($action, 40), $clean($entity, 40), $entityId, $clean($summary, 400),
+                PHP_SAPI === 'cli' ? 'command line' : mb_substr((string) ($_SERVER['REMOTE_ADDR'] ?? ''), 0, 45), time()]);
+    } catch (Throwable $e) { /* the action itself stands */ }
+}
+/** Every action the app logs: code => [what the viewer calls it, the group it is filtered under]. */
+function audit_actions(): array {
+    return [
+        'login'            => ['Signed in', 'Signing in'],
+        'login_failed'     => ['Sign-in failed', 'Signing in'],
+        'logout'           => ['Signed out', 'Signing in'],
+        'sessions_revoked' => ['Other sessions signed out', 'Signing in'],
+        'password_changed' => ['Password changed', 'Security'],
+        'password_reset'   => ['Password reset', 'Security'],
+        '2fa_enabled'      => ['Two-factor turned on', 'Security'],
+        '2fa_disabled'     => ['Two-factor turned off', 'Security'],
+        '2fa_codes'        => ['New recovery codes', 'Security'],
+        '2fa_reset'        => ['Two-factor reset', 'Security'],
+        '2fa_policy'       => ['Two-factor rule changed', 'Security'],
+        'api_token'        => ['API token changed', 'Security'],
+        'user_added'       => ['Team member added', 'Team'],
+        'user_removed'     => ['Team member removed', 'Team'],
+        'org'              => ['Organization changed', 'Settings'],
+        'routing'          => ['Lead routing changed', 'Settings'],
+        'email_account'    => ['Email account changed', 'Settings'],
+        'ai_key'           => ['AI settings changed', 'Settings'],
+        'owner_changed'    => ['Owner changed', 'Records'],
+        'bulk_assign'      => ['Bulk assign', 'Records'],
+        'bulk_tag'         => ['Bulk tag', 'Records'],
+        'bulk_delete'      => ['Bulk delete', 'Records'],
+        'delete'           => ['Deleted', 'Records'],
+        'merge'            => ['Companies merged', 'Records'],
+        'import'           => ['CSV import', 'Records'],
+        'export'           => ['CSV export', 'Records'],
+        'campaign_sent'    => ['Campaign sent', 'Records'],
+    ];
+}
+/** A team member's name for a log line, or "nobody" for 0. */
+function audit_who(int $userId): string { return $userId > 0 ? (user_label(user_by_id($userId)) ?: 'user #' . $userId) : 'nobody'; }
+/** Drop log lines older than 12 months. At most once a day; cron.php and the audit log page both call it. */
+function audit_prune(): int {
+    if (setting_get('audit_pruned', '') === date('Y-m-d')) return 0;
+    setting_set('audit_pruned', date('Y-m-d'));
+    $st = db()->prepare("DELETE FROM audit_log WHERE created_at<?");
+    $st->execute([time() - 366 * 86400]);
+    return $st->rowCount();
 }
 
 /* ---------------------------------------------------------------- flash ---- */

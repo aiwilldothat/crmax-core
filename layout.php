@@ -110,7 +110,8 @@ function base_css(): string {
  }
  .grid2>*,.grid3>*,.grid4>*{min-width:0}
  @media (max-width:900px){ .grid2.stack{grid-template-columns:1fr} }
- @media (max-width:700px){ .hide-sm{display:none} }
+ .show-sm{display:none}
+ @media (max-width:700px){ .hide-sm{display:none} .show-sm{display:block} }
  @media (max-width:560px){ .grid2,.grid3,.grid4{grid-template-columns:1fr} }
  button:focus-visible,a:focus-visible,input:focus-visible{outline:2px solid var(--brand2);outline-offset:2px}
 CSS;
@@ -204,7 +205,7 @@ function head(string $title, string $active = '', ?array $u = null): void {
     <a href="<?= h(url($it[0])) ?>" class="<?= $active === $k ? 'on' : '' ?>"><span class="ic"><?= svg_icon($it[1]) ?></span><?= h($it[2]) ?></a>
   <?php endforeach; ?>
     <div class="sep"></div>
-  <?php if (is_admin($u)): ?><a href="<?= h(url('settings.php')) ?>" class="<?= $active === 'settings' ? 'on' : '' ?>"><span class="ic"><?= svg_icon('settings') ?></span>Settings</a><?php endif; ?>
+  <?php if ($u): /* admins get every setting; a member gets their own account: password, two-factor sign-in, other sessions */ ?><a href="<?= h(url('settings.php')) ?>" class="<?= $active === 'settings' ? 'on' : '' ?>"><span class="ic"><?= svg_icon('settings') ?></span><?= is_admin($u) ? 'Settings' : 'Account' ?></a><?php endif; ?>
     <a href="<?= h(url('logout.php?t=' . csrf())) ?>"><span class="ic"><?= svg_icon('logout') ?></span>Log out</a>
   </nav>
   <?php if ($u): ?><div class="small muted" style="padding:14px 12px 0"><?= h(org_name()) ?><br><span class="tag"><?= h($u['name'] ?: $u['email']) ?></span></div><?php endif; ?>

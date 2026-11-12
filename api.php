@@ -31,6 +31,7 @@ if ($hdr === '' && function_exists('apache_request_headers')) { $h = apache_requ
 $token = preg_match('/Bearer\s+(.+)/i', $hdr, $m) ? trim($m[1]) : '';
 if (!rl_hit('api', 60, 120)) out(['error' => 'rate_limited'], 429);
 if ($token === '' || !hash_equals(api_token(), $token)) out(['error' => 'unauthorized'], 401);
+audit_as('API');   // what a call changes is logged as done by "API": the token is the whole team's, not one person's
 
 $path = trim((string) ($_SERVER['PATH_INFO'] ?? ($_GET['path'] ?? '')), '/');
 $parts = $path === '' ? [] : explode('/', $path);
@@ -184,6 +185,7 @@ if ($res === 'deals') {
         }
         $d = go_get('deals', $id);
         if ((int) $d['contact_id'] && $d['status'] !== 'open' && $d['status'] !== $oldStatus) act_log((int) $d['contact_id'], 'deal_' . $d['status'], ['name' => $d['name']]);
+        if ($existing && (int) $d['owner_id'] !== (int) $existing['owner_id']) audit('owner_changed', 'Owner of ' . audit_record('deals', $existing) . ': ' . audit_who((int) $existing['owner_id']) . ' -> ' . audit_who((int) $d['owner_id']), 'deals', $id);
         if ($notify && (int) $d['owner_id'] !== (int) ($existing['owner_id'] ?? 0)) notify_assigned('deal', (int) $d['owner_id'], null, $d);   // tell the new owner
         out(['ok' => true, 'deal' => deal_out($d)], $existing ? 200 : 201);
     }

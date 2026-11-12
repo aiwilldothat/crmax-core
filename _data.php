@@ -50,7 +50,28 @@ function go_update(string $table, int $id, array $data): void {
     $vals[] = $id;
     db()->prepare("UPDATE $table SET " . implode(',', $set) . " WHERE id=?")->execute($vals);
 }
-function go_del(string $table, int $id): void { db()->prepare("DELETE FROM $table WHERE id=?")->execute([$id]); }
+/**
+ * Delete one row. The delete goes in the audit log with what the row was called, read just before it
+ * goes - so every delete in the app is covered from this one place. Pass $audit = false when the caller
+ * writes a fuller line of its own (removing a team member, merging two companies).
+ */
+function go_del(string $table, int $id, bool $audit = true): void {
+    $row = $audit ? go_get($table, $id) : null;
+    db()->prepare("DELETE FROM $table WHERE id=?")->execute([$id]);
+    if ($row) audit('delete', 'Deleted ' . audit_record($table, $row), $table, $id);
+}
+/** A row as a log line names it: the contact "Dana Lee" (dana@example.com), the deal "Website rebuild", task #12. */
+function audit_record(string $table, array $row): string {
+    static $noun = ['contacts' => 'the contact', 'companies' => 'the company', 'deals' => 'the deal', 'tasks' => 'the task', 'campaigns' => 'the campaign',
+        'forms' => 'the form', 'workflows' => 'the workflow', 'templates' => 'the template', 'pipelines' => 'the pipeline', 'email_accounts' => 'the email account', 'users' => 'the team member'];
+    $what = $noun[$table] ?? 'a row of ' . $table;
+    if ($table === 'contacts') {
+        $name = trim(($row['first_name'] ?? '') . ' ' . ($row['last_name'] ?? '')); $email = (string) ($row['email'] ?? '');
+        return $what . ' ' . ($name !== '' ? '"' . $name . '"' . ($email !== '' ? ' (' . $email . ')' : '') : ($email !== '' ? $email : '#' . (int) ($row['id'] ?? 0)));
+    }
+    foreach (['name', 'title', 'subject', 'from_email', 'email'] as $k) if (trim((string) ($row[$k] ?? '')) !== '') return $what . ' "' . trim((string) $row[$k]) . '"';
+    return $what . ' #' . (int) ($row['id'] ?? 0);
+}
 /**
  * Run $fn as one all-or-nothing change and return its result. The write lock is taken up front, so a
  * request that arrives at the same moment waits its turn instead of failing. Calls may nest: an inner

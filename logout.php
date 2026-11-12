@@ -3,5 +3,6 @@
 declare(strict_types=1);
 require_once __DIR__ . '/_boot.php';
 if (!csrf_ok($_GET['t'] ?? null)) { redirect('index.php'); }
+if ($u = current_user()) audit('logout', 'Signed out', 'users', (int) $u['id']);
 do_logout();
 redirect('index.php?login=1');

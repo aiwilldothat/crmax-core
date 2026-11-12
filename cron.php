@@ -32,4 +32,5 @@ if ($cli && ($why = cron_links_problem()) !== '') {
 
 $wf = wf_run_due(200);
 $camp = camp_run_due(100);
+audit_prune();   // once a day: audit log lines older than 12 months go
 echo date('c') . " workflows_processed=$wf campaign_emails_sent=$camp\n";

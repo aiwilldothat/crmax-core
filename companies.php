@@ -9,13 +9,16 @@ if (isset($_GET['export'])) {
     header('Content-Type: text/csv; charset=utf-8');
     header('Content-Disposition: attachment; filename="companies-' . date('Ymd') . '.csv"');
     $out = fopen('php://output', 'w');
-    fputcsv($out, ['name', 'website', 'domain', 'phone', 'address', 'industry', 'notes', 'people', 'created']);
+    // Every fputcsv / fgetcsv argument is spelled out: PHP 8.4 reports a call that leaves the last one to its default.
+    fputcsv($out, ['name', 'website', 'domain', 'phone', 'address', 'industry', 'notes', 'people', 'created'], ',', '"', '');
     $rows = db()->query("SELECT co.*, (SELECT COUNT(*) FROM contacts c WHERE c.company_id=co.id) people FROM companies co ORDER BY co.name COLLATE NOCASE")->fetchAll();
     foreach ($rows as $r) {
         fputcsv($out, [csv_safe($r['name']), csv_safe($r['website']), csv_safe($r['domain']), csv_safe($r['phone']), csv_safe($r['address']),
-            csv_safe($r['industry']), csv_safe($r['notes']), (int) $r['people'], date('Y-m-d', (int) $r['created_at'])]);
+            csv_safe($r['industry']), csv_safe($r['notes']), (int) $r['people'], date('Y-m-d', (int) $r['created_at'])], ',', '"', '');
     }
-    fclose($out); exit;
+    fclose($out);
+    audit('export', 'Exported ' . count($rows) . ' compan' . (count($rows) === 1 ? 'y' : 'ies') . ' as CSV', 'companies');
+    exit;
 }
 
 /* ---------- writes ---------- */
@@ -33,7 +36,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
     if ($do === 'import' && isset($_FILES['csv']) && is_uploaded_file($_FILES['csv']['tmp_name'])) {
         $fh = fopen($_FILES['csv']['tmp_name'], 'r'); $head = null; $n = 0;
-        while (($row = fgetcsv($fh)) !== false) {
+        while (($row = fgetcsv($fh, null, ',', '"', '')) !== false) {
             if ($head === null) { $head = array_map(fn($h) => strtolower(trim((string) $h)), $row); continue; }
             $r = @array_combine($head, array_pad($row, count($head), '')); if (!$r) continue;
             $name = (string) ($r['name'] ?? ($r['company'] ?? ($r['company name'] ?? '')));
@@ -41,7 +44,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             company_upsert($name, company_input($r));
             $n++;
         }
-        fclose($fh); flash_set("Imported $n row(s)."); redirect('companies.php');
+        fclose($fh);
+        audit('import', 'Imported ' . $n . ' row' . ($n === 1 ? '' : 's') . ' of companies from the CSV file "' . mb_substr(basename((string) ($_FILES['csv']['name'] ?? '')), 0, 80) . '"', 'companies');
+        flash_set("Imported $n row(s)."); redirect('companies.php');
     }
 }
 
