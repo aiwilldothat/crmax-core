@@ -2,14 +2,16 @@
 /**
  * CRMax Core - end-to-end smoke test. Command line only.
  *
- *   php tests/smoke.php            fresh installs + upgrades from v1.0 and v1.1
+ *   php tests/smoke.php            fresh installs + upgrades from v1.0, v1.1 and v1.2
  *   php tests/smoke.php --keep     keep the temp folders afterwards (for debugging)
  *
  * Nothing here touches your real data: the app is copied to a temp folder, served with PHP's
  * built-in server and driven over HTTP like a browser. Email goes to a small SMTP sink on
  * 127.0.0.1 (this file again, run with --smtp-sink), so the test can read what cron.php sends from
- * the command line. The upgrade tests check out the first release and the 1.1.0 release from git, build
- * a small database with each, then open it with the current code.
+ * the command line. The upgrade tests check out the first release and the 1.1.0 and 1.2.1 releases
+ * from git, build a small database with each, then open it with the current code.
+ * Two-factor sign-in is tested with real time-based codes: the test has its own code generator,
+ * checked against the RFC 6238 test values.
  */
 declare(strict_types=1);
 if (PHP_SAPI !== 'cli') { http_response_code(404); exit; }
@@ -54,8 +56,10 @@ function serve(string $dir): array {
     $port = (int) substr(strrchr(stream_socket_get_name($sock, false), ':'), 1);
     fclose($sock);
     $log = $dir . DS . 'server.log';
-    // No opcode cache, so a config.php rewritten between requests is read afresh.
-    $proc = proc_open([PHP_BINARY, '-d', 'opcache.enable=0', '-d', 'opcache.enable_cli=0', '-S', "127.0.0.1:$port", '-t', $dir], [0 => ['pipe', 'r'], 1 => ['file', $log, 'a'], 2 => ['file', $log, 'a']], $pipes, $dir);
+    // No opcode cache, so a config.php rewritten between requests is read afresh. Every PHP warning, notice and
+    // deprecation is printed into the page, whatever this machine's php.ini says, so the tests see it on any PHP version.
+    $proc = proc_open([PHP_BINARY, '-d', 'opcache.enable=0', '-d', 'opcache.enable_cli=0', '-d', 'display_errors=1', '-d', 'html_errors=1', '-d', 'error_reporting=-1',
+        '-S', "127.0.0.1:$port", '-t', $dir], [0 => ['pipe', 'r'], 1 => ['file', $log, 'a'], 2 => ['file', $log, 'a']], $pipes, $dir);
     for ($i = 0; $i < 50; $i++) { $c = @fsockopen('127.0.0.1', $port, $e1, $e2, 0.2); if ($c) { fclose($c); break; } usleep(100000); }
     $servers[] = $proc;
     return ["http://127.0.0.1:$port", $proc];
@@ -175,6 +179,35 @@ function row(string $dir, string $sql, array $params = []): array { $st = pdo_fo
 function id_from(array $r, string $pattern): int { return preg_match($pattern, $r['location'], $m) ? (int) $m[1] : 0; }
 function schema_hash(string $dir): string { return md5(json_encode(pdo_for($dir)->query("SELECT name, sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY name")->fetchAll())); }
 function run_php(string $file): string { $out = []; exec(escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg($file) . ' 2>&1', $out); return implode("\n", $out); }
+/** Run a PHP file on the command line with arguments. Returns [its output, its exit code]. */
+function run_cmd(string $file, string ...$args): array {
+    $out = []; $rc = 0;
+    exec(escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg($file) . ' ' . implode(' ', array_map('escapeshellarg', $args)) . ' 2>&1', $out, $rc);
+    return [implode("\n", $out), $rc];
+}
+/** True when a page came back 200 with no PHP warning, notice or error printed into it. */
+function page_clean(array $r): bool { return $r['code'] === 200 && !preg_match('/(Warning|Notice|Deprecated|Fatal error)<\/b>:|Uncaught /', $r['body']); }
+/**
+ * This test's own base32 decoder and time-based code (RFC 4648, RFC 6238), written separately from the
+ * app's so the two check each other. $step is the 30-second step, floor(unix time / 30).
+ */
+function t_b32_decode(string $s): string {
+    $abc = array_flip(str_split('ABCDEFGHIJKLMNOPQRSTUVWXYZ234567')); $acc = 0; $n = 0; $out = '';
+    foreach (str_split(strtoupper($s)) as $ch) {
+        if (!isset($abc[$ch])) continue;
+        $acc = ($acc << 5) | $abc[$ch]; $n += 5;
+        if ($n >= 8) { $n -= 8; $out .= chr(($acc >> $n) & 0xFF); $acc &= (1 << $n) - 1; }
+    }
+    return $out;
+}
+function t_totp(string $secret, int $step): string {
+    $msg = '';
+    for ($i = 7; $i >= 0; $i--) $msg .= chr(($step >> ($i * 8)) & 0xFF);
+    $mac = array_values(unpack('C*', hash_hmac('sha1', $msg, $secret, true)));
+    $at = $mac[19] & 15;
+    $bin = (($mac[$at] & 127) << 24) + ($mac[$at + 1] << 16) + ($mac[$at + 2] << 8) + $mac[$at + 3];
+    return sprintf('%06d', $bin % 1000000);
+}
 function setup_admin(Client $c, string $email, string $pass): array {
     $c->loadCsrf('/index.php');
     return $c->post('/index.php', ['name' => 'Ada Admin', 'org' => 'Smoke Org', 'email' => $email, 'password' => $pass]);
@@ -250,7 +283,7 @@ try {
     $r = $c->get('/index.php');
     check('dashboard renders', $r['code'] === 200 && strpos($r['body'], 'Good day') !== false, 'HTTP ' . $r['code']);
     $adminId = (int) one($dir, "SELECT id FROM users WHERE email='ada@example.test'");
-    check('database is at schema version 3', one($dir, "SELECT v FROM settings WHERE k='schema_version'") === '3');
+    check('database is at schema version 4', one($dir, "SELECT v FROM settings WHERE k='schema_version'") === '4');
     check('the data folder protects itself on Apache', str_contains((string) @file_get_contents($dir . DS . 'data' . DS . '.htaccess'), 'Require all denied'));
     $h1 = schema_hash($dir);
     file_put_contents($dir . DS . 'again.php', "<?php require __DIR__ . '/_boot.php'; db(); echo 'ok';");
@@ -1153,6 +1186,507 @@ try {
     }
     stop($osrv);
 
+    /* ================ G. two-factor sign-in and the audit log (new in 1.3) === */
+    section('QR code and code maths');
+    $sdir = tmpdir('secure');
+    copy_app($ROOT, $sdir);
+    file_put_contents($sdir . DS . 'config.php', "<?php return ['base_url' => 'https://crm.example.test'];");   // for cron on the command line
+    [$sbase, $ssrv] = serve($sdir);
+    $s = new Client($sbase, $sdir . DS . 'jar.txt');
+    setup_admin($s, 'sam@example.test', 'smoke-pass-s1');
+    $s->loadCsrf('/settings.php');
+    $sam = (int) one($sdir, "SELECT id FROM users WHERE email='sam@example.test'");
+    // The pieces are run inside the app, on the command line, and answer as JSON.
+    file_put_contents($sdir . DS . 'maths.php', <<<'PHP'
+        <?php
+        require __DIR__ . '/lib.php'; require __DIR__ . '/qr.php';
+        $fmt = function (array $m): string {   // the 15 format bits next to the top-left corner, most significant first
+            $at = []; for ($i = 0; $i <= 5; $i++) $at[$i] = [8, $i]; $at[6] = [8, 7]; $at[7] = [8, 8]; $at[8] = [7, 8]; for ($i = 9; $i < 15; $i++) $at[$i] = [14 - $i, 8];
+            $s = ''; for ($i = 14; $i >= 0; $i--) $s .= $m[$at[$i][1]][$at[$i][0]];
+            return $s; };
+        $fill = function (int $n, int $i): string { $t = ''; for ($k = 0; $k < $n; $k++) $t .= chr(33 + ($k * 7 + $i) % 90); return $t; };
+        $hash = fn(string $text): string => count($m = qr_matrix($text)) . ' ' . md5(implode("\n", array_map('implode', $m)));
+        $m7 = qr_matrix(str_repeat('x', 110)); $v7 = '';
+        for ($i = 17; $i >= 0; $i--) $v7 .= $m7[count($m7) - 11 + $i % 3][intdiv($i, 3)];
+        $sealed = secret_seal('twenty bytes of key..');
+        echo json_encode([
+            'rs'    => qr_rs_remainder([32, 91, 11, 120, 209, 114, 220, 77, 67, 64, 236, 17, 236, 17, 236, 17], qr_rs_generator(10)),
+            'fmt'   => [$fmt(qr_matrix('A', 0)), $fmt(qr_matrix('A', 5))],
+            'v7'    => count($m7) . ' ' . $v7,
+            'sizes' => [count(qr_matrix('a')), count(qr_matrix(str_repeat('a', 14))), count(qr_matrix(str_repeat('a', 15))), count(qr_matrix(str_repeat('z', 666))), count(qr_matrix(str_repeat('z', 667)))],
+            'gold'  => [$hash('otpauth://totp/Acme%20Pty%20Ltd:ada.admin%40example.test?secret=JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP&issuer=Acme%20Pty%20Ltd&algorithm=SHA1&digits=6&period=30'),
+                        $hash($fill(14, 0)), $hash($fill(331, 12)), $hash($fill(666, 19)), $hash("Caf\xC3\xA9 \xE2\x9C\x93 two-factor")],
+            'svg'   => qr_svg('CRMax', 120),
+            'totp'  => array_map(fn($t) => totp_at('12345678901234567890', intdiv($t, 30)), [59, 1111111109, 1111111111, 1234567890, 2000000000, 20000000000]),
+            'b32'   => [b32_encode('foobar'), b32_decode('MZXW6YTBOI'), b32_encode(''), b32_decode('mzxw 6ytb oi'), strlen(b32_encode(random_bytes(20)))],
+            'seal'  => [secret_open($sealed), str_contains($sealed, 'twenty'), secret_open(substr($sealed, 0, -3) . 'AAA'), secret_open('nonsense'), secret_seal('x') !== secret_seal('x')],
+            'codes' => recovery_codes_new(),
+            'uri'   => totp_uri('JBSWY3DPEHPK3PXP', 'sam@example.test'),
+        ]);
+        PHP);
+    $o = run_php($sdir . DS . 'maths.php');
+    $mj = json_decode($o, true) ?: [];
+    check('error correction matches the published worked example', ($mj['rs'] ?? null) === [196, 35, 39, 119, 235, 215, 231, 226, 93, 23], substr($o, 0, 200));
+    check('format bits match the standard for masks 0 and 5', ($mj['fmt'] ?? null) === ['101010000010010', '100000011001110'], json_encode($mj['fmt'] ?? null));
+    check('a version 7 code carries the right version bits', ($mj['v7'] ?? '') === '45 000111110010010100', (string) ($mj['v7'] ?? ''));
+    check('the code grows with the text, up to 666 bytes', ($mj['sizes'] ?? null) === [21, 21, 25, 97, 0], json_encode($mj['sizes'] ?? null));
+    // These five were read back correctly by an independent QR reader when 1.3 was built. If one changes, qr.php changed what it draws: scan the new codes with a phone before trusting them.
+    check('five reference codes are drawn exactly as when a reader last verified them', ($mj['gold'] ?? null) === ['53 24f41183b222b5fc095c0142a514df3d', '21 4ddf6a5862c43962440708981af15042', '69 9ac2dcf28f51b782a817cdbe5eee7cff', '97 018826d2cb56fb53529cdd7a9a4a1a61', '25 4896f13be2af64126f8554308ef8e417'], json_encode($mj['gold'] ?? null));
+    check('the code is drawn as an SVG with a quiet zone', str_starts_with($mj['svg'] ?? '', '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 29 29" width="120" height="120"') && str_contains($mj['svg'], '<path d="M4 4h7v1h-7z'));
+    check('sign-in codes match the RFC 6238 test values, in the app and in this test', ($mj['totp'] ?? null) === ['287082', '081804', '050471', '005924', '279037', '353130']
+        && t_totp('12345678901234567890', 1) === '287082' && t_totp('12345678901234567890', intdiv(20000000000, 30)) === '353130', json_encode($mj['totp'] ?? null));
+    check('base32 matches RFC 4648, ignoring case and spaces', ($mj['b32'] ?? null) === ['MZXW6YTBOI', 'foobar', '', 'foobar', 32] && t_b32_decode('MZXW6YTBOI') === 'foobar', json_encode($mj['b32'] ?? null));
+    check('a sealed secret opens again, is not readable as stored, and does not open if altered', ($mj['seal'] ?? null) === ['twenty bytes of key..', false, '', '', true], json_encode($mj['seal'] ?? null));
+    check('recovery codes are ten different easy-to-read codes', count($mj['codes'] ?? []) === 10 && count(array_unique($mj['codes'])) === 10 && count(preg_grep('/^[a-hjkmnp-z2-9]{5}-[a-hjkmnp-z2-9]{5}$/', $mj['codes'])) === 10, implode(' ', $mj['codes'] ?? []));
+    check('the set-up address names the organisation and the account', ($mj['uri'] ?? '') === 'otpauth://totp/Smoke%20Org%3Asam%40example.test?secret=JBSWY3DPEHPK3PXP&issuer=Smoke%20Org&algorithm=SHA1&digits=6&period=30', (string) ($mj['uri'] ?? ''));
+    check('qr.php and recover.php do nothing when opened in a browser', $s->get('/qr.php')['code'] === 404 && $s->get('/recover.php')['code'] === 404 && $s->get('/recover.php?password=sam@example.test')['code'] === 404);
+
+    section('Two-factor sign-in: turning it on');
+    $step = fn(): int => intdiv(time(), 30);
+    $code = fn(string $key, int $off = 0): string => t_totp(t_b32_decode($key), $step() + $off);
+    $wrong = function (string $key) use ($code): string {   // six digits that are not a valid code right now
+        $bad = '123456';
+        while (in_array($bad, [$code($key, -2), $code($key, -1), $code($key), $code($key, 1), $code($key, 2)], true)) $bad = sprintf('%06d', ((int) $bad + 1) % 1000000);
+        return $bad;
+    };
+    $urow = fn(int $uid): array => row($sdir, "SELECT * FROM users WHERE id=?", [$uid]);
+    // The test signs in many times a minute, and a code only works once: this lets the next one through.
+    $fresh = function (int $uid) use ($sdir): void { pdo_for($sdir)->prepare("UPDATE users SET totp_last_step=0 WHERE id=?")->execute([$uid]); };
+    $unlock = function () use ($sdir): void { foreach (glob($sdir . DS . 'data' . DS . 'rl_*.json') ?: [] as $f) @unlink($f); };   // forget the wrong attempts so far
+    $keyOn = fn(Client $c): string => preg_match('/<p class="mono"[^>]*>([A-Z2-7 ]+)<\/p>/', $c->get('/twofa.php')['body'], $km) ? str_replace(' ', '', $km[1]) : '';
+    $codesOn = function (Client $c): array {   // the recovery codes on the page that shows them once
+        return preg_match('/<pre class="mono" id="rcodes"[^>]*>([^<]+)<\/pre>/', $c->get('/twofa.php?codes=1')['body'], $cm) ? array_values(array_filter(array_map('trim', explode("\n", $cm[1])))) : [];
+    };
+    $enable = function (Client $c, string $pass) use ($keyOn, $codesOn, $code): array {   // turn two-factor on for whoever $c is; returns [key, recovery codes]
+        $c->post('/twofa.php', ['do' => 'begin', 'password' => $pass]);
+        $key = $keyOn($c);
+        $c->post('/twofa.php', ['do' => 'confirm', 'code' => $code($key)]);
+        return [$key, $codesOn($c)];
+    };
+    $signIn2 = function (Client $c, string $email, string $pass, string $key, int $uid) use ($fresh, $code): array {   // password, then a code
+        sign_in($c, $email, $pass);
+        $fresh($uid);
+        $r = $c->post('/index.php?login=1', ['code' => $code($key)]);
+        $c->loadCsrf('/settings.php');
+        return $r;
+    };
+    $in = fn(Client $c): bool => $c->get('/contacts.php')['code'] === 200;   // is this browser signed in?
+    $r = $s->get('/twofa.php');
+    check('your account offers two-factor sign-in, off to start with', $r['code'] === 200 && str_contains($r['body'], 'Two-factor sign-in <span class="tag">off</span>')
+        && str_contains($s->get('/settings.php')['body'], '>Set up two-factor sign-in</a>') && (int) $urow($sam)['totp_enabled'] === 0);
+    $s->post('/twofa.php', ['do' => 'begin', 'password' => 'not-my-password']);
+    check('starting the set-up takes your password', flash_of($s, '/twofa.php') === 'err: That is not your password.' && $keyOn($s) === '');
+    $s->post('/twofa.php', ['do' => 'begin', 'password' => 'smoke-pass-s1']);
+    $r = $s->get('/twofa.php');
+    $key = $keyOn($s);
+    check('set-up shows a QR code and the key to type by hand, and loads nothing from outside', $r['code'] === 200 && str_contains($r['body'], '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ')
+        && strlen($key) === 32 && strlen(t_b32_decode($key)) === 20 && !preg_match('/<img|<link|src=/', $r['body']), 'key length ' . strlen($key));
+    check('nothing is saved on the account until a code has been typed back', (int) $urow($sam)['totp_enabled'] === 0 && $urow($sam)['totp_secret'] === '');
+    $s->post('/twofa.php', ['do' => 'confirm', 'code' => $wrong($key)]);
+    check('a wrong code does not turn it on', flash_of($s, '/twofa.php') === 'err: That code is not right. Type the 6 digits your app shows now for this account.' && (int) $urow($sam)['totp_enabled'] === 0);
+    $r = $s->post('/twofa.php', ['do' => 'confirm', 'code' => $code($key)]);
+    $rc = $codesOn($s);
+    $ur = $urow($sam);
+    check('the right code turns it on and shows ten recovery codes', str_ends_with($r['location'], 'twofa.php?codes=1') && count($rc) === 10 && count(array_unique($rc)) === 10 && (int) $ur['totp_enabled'] === 1, 'codes ' . count($rc));
+    check('the recovery codes are shown that once only', $s->get('/twofa.php?codes=1')['code'] === 302 && !str_contains($s->get('/twofa.php')['body'], $rc[0] ?? 'none'));
+    check('the secret is stored sealed and the recovery codes hashed', str_starts_with($ur['totp_secret'], 'v1.') && !str_contains($ur['totp_secret'], $key)
+        && !str_contains((string) base64_decode(substr($ur['totp_secret'], 3)), t_b32_decode($key)) && count(json_decode($ur['recovery_codes'], true) ?: []) === 10
+        && !str_contains($ur['recovery_codes'], $rc[0] ?? 'none') && !str_contains($ur['recovery_codes'], str_replace('-', '', $rc[0] ?? 'none')));
+    check('the browser that set it up stays signed in', $in($s));
+    $s->get('/settings.php');
+    $stok = (string) one($sdir, "SELECT v FROM settings WHERE k='api_token'");
+
+    section('Two-factor sign-in: signing in');
+    $s2 = new Client($sbase, $sdir . DS . 'jar-2.txt');
+    $r = sign_in($s2, 'sam@example.test', 'smoke-pass-s1');
+    $b = $s2->get('/index.php')['body'];
+    check('the right password alone opens nothing: the next screen asks for a code', $r['code'] === 302 && str_contains($b, '<h1>Enter your code</h1>') && !str_contains($b, 'Good day')
+        && !$in($s2) && $s2->get('/audit.php')['code'] === 302 && $s2->get('/twofa.php')['code'] === 302 && $s2->get('/contacts.php?export=1')['code'] === 302 && $s2->get('/settings.php')['code'] === 302);
+    $r = $s2->post('/index.php?login=1', ['code' => $wrong($key)]);
+    check('a wrong code is refused', $r['code'] === 200 && str_contains($r['body'], 'That code is not right. Codes change every 30 seconds and each one works once.') && !$in($s2));
+    $fresh($sam);
+    $r1 = $s2->post('/index.php?login=1', ['code' => $code($key, -10)]); $r2 = $s2->post('/index.php?login=1', ['code' => $code($key, 10)]);
+    $r3 = $s2->post('/index.php?login=1', ['code' => $code($key, -2)]); $r4 = $s2->post('/index.php?login=1', ['code' => $code($key, 3)]);
+    check('a code from five minutes ago or five minutes ahead is refused, and so is one a minute out', str_contains($r1['body'], 'That code is not right') && str_contains($r2['body'], 'That code is not right')
+        && str_contains($r3['body'], 'That code is not right') && str_contains($r4['body'], 'That code is not right') && !$in($s2));
+    $used = $code($key);
+    $r = $s2->post('/index.php?login=1', ['code' => $used]);
+    check('the right code finishes signing in', $r['code'] === 302 && $in($s2) && str_contains($s2->get('/index.php')['body'], 'Good day'), 'HTTP ' . $r['code']);
+    $s3 = new Client($sbase, $sdir . DS . 'jar-3.txt');
+    sign_in($s3, 'sam@example.test', 'smoke-pass-s1');
+    $r = $s3->post('/index.php?login=1', ['code' => $used]);
+    check('a code that has been used does not work a second time', str_contains($r['body'], 'That code is not right') && !$in($s3));
+    $r = $s3->post('/index.php?login=1', ['code' => ' ' . substr($code($key, 1), 0, 3) . ' ' . substr($code($key, 1), 3) . ' ']);
+    check('the next code does, typed with a space in the middle', $r['code'] === 302 && $in($s3), 'HTTP ' . $r['code']);
+    check('the API token keeps working: it is not a sign-in', $s->api('GET', 'me', $stok)['code'] === 200);
+    $s4 = new Client($sbase, $sdir . DS . 'jar-4.txt');
+    sign_in($s4, 'sam@example.test', 'smoke-pass-s1');
+    $r = $s4->post('/index.php?login=1', ['code' => strtoupper(str_replace('-', ' ', $rc[0]))]);
+    $said = flash_of($s4, '/index.php');
+    check('a recovery code signs in instead, however it is typed, and says how many are left', $r['code'] === 302 && $in($s4)
+        && $said === 'ok: You signed in with a recovery code. You have 9 left: make new ones under Settings, Two-factor sign-in.', $said);
+    $s5 = new Client($sbase, $sdir . DS . 'jar-5.txt');
+    sign_in($s5, 'sam@example.test', 'smoke-pass-s1');
+    $r = $s5->post('/index.php?login=1', ['code' => $rc[0]]);
+    check('each recovery code works once', str_contains($r['body'], 'That code is not right') && !$in($s5) && count(json_decode($urow($sam)['recovery_codes'], true)) === 9);
+    $r = $s5->get('/index.php?login=1&cancel=1');
+    check('"Use a different account" drops the half-finished sign-in', $r['code'] === 302 && str_contains($s5->get('/index.php?login=1')['body'], '<h1>Sign in</h1>'));
+    $unlock();
+    $s6 = new Client($sbase, $sdir . DS . 'jar-6.txt');
+    sign_in($s6, 'sam@example.test', 'smoke-pass-s1');
+    for ($i = 0; $i < 5; $i++) $s6->post('/index.php?login=1', ['code' => $wrong($key)]);
+    $s6->get('/index.php?login=1&cancel=1');
+    sign_in($s6, 'sam@example.test', 'smoke-pass-s1');   // the right password again, in between
+    $s6->post('/index.php?login=1', ['code' => $wrong($key)]);
+    $fresh($sam);
+    $r = $s6->post('/index.php?login=1', ['code' => $code($key)]);
+    check('six wrong codes lock that address out, and a right password in between does not reset the count', str_contains($r['body'], 'Too many attempts. Try again in') && !$in($s6));
+    $unlock();
+    file_put_contents($sdir . DS . 'data' . DS . 'rl_2fa_' . $sam . '.json', json_encode(array_fill(0, 8, time())));   // eight wrong codes against this account, from anywhere
+    $fresh($sam);
+    $r = $s6->post('/index.php?login=1', ['code' => $code($key)]);
+    check('eight wrong codes against one account lock its second step, whatever address they came from', str_contains($r['body'], 'Too many wrong codes. Try again in a few minutes.') && !$in($s6));
+    $unlock(); $fresh($sam);
+    $r = $s6->post('/index.php?login=1', ['code' => $code($key)]);
+    check('once the lock has passed, the right code signs in', $r['code'] === 302 && $in($s6));
+    $unlock();
+
+    section('Two-factor sign-in: looking after it');
+    $b = $s->get('/twofa.php')['body'];
+    check('your account shows it is on and how many recovery codes are left', str_contains($b, 'Two-factor sign-in <span class="tag ok">on</span>') && str_contains($b, 'Recovery codes left: <b>9</b> of 10')
+        && str_contains($s->get('/settings.php')['body'], '9 of 10 recovery codes left'));
+    $s->post('/twofa.php', ['do' => 'codes', 'password' => 'not-my-password', 'code' => $code($key)]);
+    $said = flash_of($s, '/twofa.php');
+    $fresh($sam);
+    $s->post('/twofa.php', ['do' => 'codes', 'password' => 'smoke-pass-s1', 'code' => $wrong($key)]);
+    check('new recovery codes take your password and a code', $said === 'err: That is not your password.' && flash_of($s, '/twofa.php') === 'err: That code is not right. Use a current code from your authenticator app, or a recovery code.'
+        && count(json_decode($urow($sam)['recovery_codes'], true)) === 9);
+    $fresh($sam);
+    $s->post('/twofa.php', ['do' => 'codes', 'password' => 'smoke-pass-s1', 'code' => $code($key)]);
+    $rc2 = $codesOn($s);
+    $s7 = new Client($sbase, $sdir . DS . 'jar-7.txt');
+    sign_in($s7, 'sam@example.test', 'smoke-pass-s1');
+    $r1 = $s7->post('/index.php?login=1', ['code' => $rc[1]]);
+    $r2 = $s7->post('/index.php?login=1', ['code' => $rc2[0] ?? '']);
+    check('they replace the old ones, which stop working', count($rc2) === 10 && !array_intersect($rc, $rc2) && str_contains($r1['body'], 'That code is not right') && $r2['code'] === 302 && $in($s7));
+    $unlock(); $fresh($sam);
+    $s->post('/twofa.php', ['do' => 'begin', 'password' => 'smoke-pass-s1', 'code' => $code($key)]);   // a new phone
+    $key2 = $keyOn($s);
+    $s8 = new Client($sbase, $sdir . DS . 'jar-8.txt');
+    $r = $signIn2($s8, 'sam@example.test', 'smoke-pass-s1', $key, $sam);
+    check('moving to a new phone starts a fresh set-up, and the old phone works until it is finished', strlen($key2) === 32 && $key2 !== $key && $r['code'] === 302 && $in($s8));
+    $s->post('/twofa.php', ['do' => 'confirm', 'code' => $code($key2)]);
+    $rc3 = $codesOn($s);
+    $s9 = new Client($sbase, $sdir . DS . 'jar-9.txt');
+    sign_in($s9, 'sam@example.test', 'smoke-pass-s1');
+    $fresh($sam);
+    $r1 = $s9->post('/index.php?login=1', ['code' => $code($key)]);
+    $fresh($sam);
+    $r2 = $s9->post('/index.php?login=1', ['code' => $code($key2)]);
+    check('once the new phone is confirmed the old one stops working, and the other browsers are signed out', count($rc3) === 10 && str_contains($r1['body'], 'That code is not right') && $r2['code'] === 302
+        && $in($s9) && $in($s) && !$in($s8) && !$in($s2));
+    $unlock();
+    $s->post('/twofa.php', ['do' => 'disable', 'password' => 'smoke-pass-s1', 'code' => $wrong($key2)]);
+    $said = flash_of($s, '/twofa.php');
+    $fresh($sam);
+    $s->post('/twofa.php', ['do' => 'disable', 'password' => 'smoke-pass-s1', 'code' => $code($key2)]);
+    $ur = $urow($sam);
+    $s10 = new Client($sbase, $sdir . DS . 'jar-10.txt');
+    $r = sign_in($s10, 'sam@example.test', 'smoke-pass-s1');
+    check('turning it off takes your password and a code, forgets the secret, and the password alone signs in again', str_starts_with($said, 'err: That code is not right.')
+        && flash_of($s, '/settings.php') === 'ok: Two-factor sign-in is off. Your other sessions were signed out.' && (int) $ur['totp_enabled'] === 0 && $ur['totp_secret'] === '' && $ur['recovery_codes'] === '[]'
+        && $r['code'] === 302 && $in($s10) && !$in($s9));
+
+    section('Two-factor sign-in: the team');
+    $s->post('/settings.php', ['do' => 'add_user', 'uname' => 'Mel Member', 'email' => 'mel@example.test', 'upass' => 'smoke-pass-m1', 'role' => 'member']);
+    $mel = (int) one($sdir, "SELECT id FROM users WHERE email='mel@example.test'");
+    $m = new Client($sbase, $sdir . DS . 'jar-mel.txt');
+    sign_in($m, 'mel@example.test', 'smoke-pass-m1');
+    $b = $m->get('/index.php')['body']; $b2 = $m->get('/settings.php')['body'];
+    check('a member has an Account page for their own password, two-factor sign-in and sessions', str_contains($b, 'Account</a>') && !str_contains($b, 'Settings</a>') && str_contains($s->get('/index.php')['body'], 'Settings</a>')
+        && str_contains($b2, 'id="account"') && str_contains($b2, 'Sign out my other sessions') && !str_contains($b2, 'id="team"') && !str_contains($b2, 'id="security"'));
+    [$mkey, $mrc] = $enable($m, 'smoke-pass-m1');
+    $b = $s->get('/settings.php')['body'];
+    check('Settings shows who on the team has two-factor sign-in', (int) $urow($mel)['totp_enabled'] === 1 && count($mrc) === 10 && str_contains($b, '1 of 2 people do not have it on yet.') && str_contains($b, 'name="do" value="totp_reset"'));
+    $r = $m->post('/settings.php', ['do' => 'totp_reset', 'id' => $mel]);
+    $s->post('/settings.php', ['do' => 'totp_reset', 'id' => $sam]);
+    check('a member cannot reset anyone, and an admin uses their own account page for theirs', $r['code'] === 403 && (int) $urow($mel)['totp_enabled'] === 1
+        && flash_of($s, '/settings.php') === 'err: To change your own two-factor sign-in, use Your account below.');
+    $s->post('/settings.php', ['do' => 'totp_reset', 'id' => $mel]);
+    $said = flash_of($s, '/settings.php');
+    $out = !$in($m);
+    $r = sign_in($m, 'mel@example.test', 'smoke-pass-m1');
+    check('an admin can reset a member who lost their phone: they are signed out and sign in with their password', $said === 'ok: Two-factor sign-in is off for Mel Member, and they were signed out everywhere.'
+        && $out && (int) $urow($mel)['totp_enabled'] === 0 && $urow($mel)['totp_secret'] === '' && $r['code'] === 302 && $in($m), $said);
+    $s->post('/settings.php', ['do' => 'security', 'require_2fa' => 'on']);
+    check('an admin without two-factor sign-in cannot require it of everyone else', flash_of($s, '/settings.php') === 'err: Turn on two-factor sign-in for your own account first, then require it for the team.'
+        && one($sdir, "SELECT v FROM settings WHERE k='require_2fa'") !== '1');
+    [$key3, $rc4] = $enable($s, 'smoke-pass-s1');
+    $s->post('/settings.php', ['do' => 'security', 'require_2fa' => 'on']);
+    $said = flash_of($s, '/settings.php');
+    $r = $m->get('/contacts.php'); $r2 = $m->get('/index.php'); $b = $m->get('/twofa.php')['body'];
+    check('once it is required, someone without it is taken to the set-up page whatever they open', str_starts_with($said, 'ok: Two-factor sign-in is now required.') && one($sdir, "SELECT v FROM settings WHERE k='require_2fa'") === '1'
+        && $r['code'] === 302 && str_ends_with($r['location'], 'twofa.php') && $r2['code'] === 302 && str_ends_with($r2['location'], 'twofa.php') && $m->get('/contacts.php?export=1')['code'] === 302
+        && str_contains($b, 'Your team requires two-factor sign-in. Set it up to carry on') && $in($s), 'HTTP ' . $r['code'] . ' ' . $r['location']);
+    $r = $m->post('/contacts.php', ['do' => 'save', 'id' => 0, 'first_name' => 'Gate', 'email' => 'gate@example.test']);
+    check('a form they were in the middle of still saves, and the API is not affected', (int) one($sdir, "SELECT COUNT(*) FROM contacts WHERE email='gate@example.test'") === 1 && $s->api('GET', 'me', $stok)['code'] === 200);
+    [$mkey, $mrc] = $enable($m, 'smoke-pass-m1');
+    check('after setting it up they are back in', count($mrc) === 10 && $in($m) && $m->get('/index.php')['code'] === 200);
+    $m->post('/twofa.php', ['do' => 'disable', 'password' => 'smoke-pass-m1', 'code' => $code($mkey)]);
+    check('while it is required it cannot be turned off', flash_of($m, '/twofa.php') === 'err: Your team requires two-factor sign-in, so it cannot be turned off. You can move it to a new phone instead.'
+        && (int) $urow($mel)['totp_enabled'] === 1 && !str_contains($m->get('/twofa.php')['body'], 'value="disable"'));
+    $s->post('/settings.php', ['do' => 'security']);
+    check('an admin can make it optional again', flash_of($s, '/settings.php') === 'ok: Two-factor sign-in is optional again.' && one($sdir, "SELECT v FROM settings WHERE k='require_2fa'") === '0'
+        && str_contains($m->get('/twofa.php')['body'], 'value="disable"'));
+    $unlock();
+
+    section('Signing out other sessions');
+    $x = new Client($sbase, $sdir . DS . 'jar-x.txt');
+    $r = $signIn2($x, 'mel@example.test', 'smoke-pass-m1', $mkey, $mel);
+    $m->post('/settings.php', ['do' => 'signout_others']);
+    $said = flash_of($m, '/settings.php');
+    $b = $x->get('/contacts.php'); $b2 = $x->get('/index.php?login=1')['body'];
+    check('"Sign out my other sessions" ends every other session of yours and keeps this one', $r['code'] === 302 && $b['code'] === 302 && !$in($x) && $in($m) && $in($s)
+        && $said === 'ok: Your other sessions were signed out. This one stays signed in.', $said);
+    check('the browser that was signed out is told so, and its sign-in form works straight away', str_contains($b2, 'You were signed out of this session. Sign in again to carry on.')
+        && $signIn2($x, 'mel@example.test', 'smoke-pass-m1', $mkey, $mel)['code'] === 302 && $in($x));
+    $ok = $in($x);
+    $m->post('/settings.php', ['do' => 'passwd', 'current' => 'smoke-pass-m1', 'new' => 'smoke-pass-m2']);
+    $said = flash_of($m, '/settings.php');
+    check('changing your password signs out your other sessions too', $ok && !$in($x) && $in($m) && $said === 'ok: Password changed. Your other sessions were signed out.', $said);
+    $r = $m->get('/logout.php?t=' . $m->csrf);
+    check('signing out ends the session', $r['code'] === 302 && !$in($m));
+
+    section('Locked out: recover.php on the server');
+    [$o, $rc0] = run_cmd($sdir . DS . 'recover.php');
+    check('it lists the accounts and whether two-factor sign-in is on', $rc0 === 0 && preg_match('/sam@example\.test\s+admin\s+two-factor on/', $o) === 1 && preg_match('/mel@example\.test\s+member\s+two-factor on/', $o) === 1, $o);
+    [$o, $rc0] = run_cmd($sdir . DS . 'recover.php', '2fa-off', 'SAM@example.test');
+    $r = sign_in($s, 'sam@example.test', 'smoke-pass-s1');
+    check('2fa-off turns two-factor sign-in off: the password alone signs in again', $rc0 === 0 && str_contains($o, 'Two-factor sign-in is off for sam@example.test.') && (int) $urow($sam)['totp_enabled'] === 0
+        && $r['code'] === 302 && $in($s), $o);
+    [$o, $rc0] = run_cmd($sdir . DS . 'recover.php', 'password', 'sam@example.test');
+    $newPass = preg_match('/^New password for sam@example\.test: (\S{16})$/m', $o, $pm) ? $pm[1] : '';
+    $gone = !$in($s);
+    $r1 = sign_in($s, 'sam@example.test', 'smoke-pass-s1');
+    $r2 = sign_in($s, 'sam@example.test', $newPass);
+    check('password prints a new password once: the old one stops working, every session ends, the new one signs in', $rc0 === 0 && $newPass !== '' && $gone && $r1['code'] === 200 && $r2['code'] === 302 && $in($s), $o);
+    [$o, $rc0] = run_cmd($sdir . DS . 'recover.php', 'password', 'nobody@example.test');
+    [$o2, $rcB] = run_cmd($sdir . DS . 'recover.php', 'delete-everything', 'sam@example.test');
+    check('an address that has no account, or a command it does not know, changes nothing', $rc0 === 1 && str_contains($o, 'No account with the email address nobody@example.test') && $rcB === 2 && str_contains($o2, 'Usage:')
+        && sign_in(new Client($sbase, $sdir . DS . 'jar-11.txt'), 'sam@example.test', $newPass)['code'] === 302);
+    $unlock();
+
+    section('Audit log: what is recorded');
+    $logged = fn(string $action, string $more = '1=1', array $p = []): int => (int) one($sdir, "SELECT COUNT(*) FROM audit_log WHERE action=? AND $more", array_merge([$action], $p));
+    $last = fn(string $action): array => row($sdir, "SELECT * FROM audit_log WHERE action=? ORDER BY id DESC LIMIT 1", [$action]);
+    $since = fn(): int => (int) one($sdir, "SELECT COALESCE(MAX(id), 0) FROM audit_log");
+    $after = fn(int $id): array => pdo_for($sdir)->query("SELECT action, actor, summary, entity, entity_id, user_id, ip FROM audit_log WHERE id>$id ORDER BY id")->fetchAll();
+    $line = fn(array $r): string => $r['actor'] . ' | ' . $r['action'] . ' | ' . $r['summary'];
+    $lines = fn(int $id): array => array_map($line, $after($id));
+    $first = row($sdir, "SELECT * FROM audit_log ORDER BY id LIMIT 1");
+    check('the log starts with the set-up of the first account', ($first['action'] ?? '') === 'user_added' && $first['summary'] === 'Set-up: the first account, an admin (sam@example.test)' && (int) $first['entity_id'] === $sam);
+    check('sign-ins are recorded with how they were made', $logged('login', "summary='Signed in' AND user_id=?", [$sam]) >= 2 && $logged('login', "summary='Signed in with a two-factor code' AND user_id=?", [$sam]) >= 3
+        && $logged('login', "summary='Signed in with a recovery code (9 left)' AND actor='Ada Admin'") === 2 && $logged('logout', 'user_id=?', [$mel]) === 1);
+    $n0 = $since();
+    $bad = new Client($sbase, $sdir . DS . 'jar-bad.txt');
+    sign_in($bad, 'Sam@Example.test', 'guess-one');
+    sign_in($bad, 'stranger@example.test', 'guess-two');
+    $got = $after($n0);
+    check('a failed sign-in records the address that was typed, never the password', count($got) === 2 && $got[0]['action'] === 'login_failed' && $got[0]['actor'] === 'sam@example.test' && $got[0]['summary'] === 'Wrong email or password'
+        && (int) $got[0]['user_id'] === 0 && $got[0]['entity'] === 'users' && (int) $got[0]['entity_id'] === $sam && $got[1]['actor'] === 'stranger@example.test' && (int) $got[1]['entity_id'] === 0 && $got[0]['ip'] === '127.0.0.1', json_encode($got));
+    check('wrong codes are recorded against the account', $logged('login_failed', "summary='Wrong two-factor code' AND entity_id=?", [$sam]) >= 8);
+    check('every two-factor change is recorded', $logged('2fa_enabled', "summary='Turned on two-factor sign-in' AND user_id=?", [$sam]) === 2 && $logged('2fa_enabled', "summary='Set up two-factor sign-in again, with a new authenticator'") === 1
+        && $logged('2fa_codes', 'user_id=?', [$sam]) === 1 && $logged('2fa_disabled', 'user_id=?', [$sam]) === 1 && $logged('2fa_enabled', 'user_id=?', [$mel]) === 2
+        && $last('2fa_policy')['summary'] === 'Made two-factor sign-in optional again' && $logged('2fa_policy') === 2
+        && $logged('2fa_reset', "summary='Reset two-factor sign-in for Mel Member (mel@example.test)' AND actor='Ada Admin' AND entity_id=?", [$mel]) === 1);
+    check('what was done from the server is recorded as the command line', $logged('2fa_reset', "actor='Command line' AND ip='command line' AND summary='Turned off two-factor sign-in for Ada Admin (sam@example.test) from the server'") === 1
+        && $logged('password_reset', "actor='Command line' AND summary='Reset the password of Ada Admin (sam@example.test) from the server' AND entity_id=?", [$sam]) === 1);
+    check('password changes, signing out other sessions and new team members are recorded', $logged('password_changed', 'user_id=?', [$mel]) === 1 && $logged('sessions_revoked', 'user_id=?', [$mel]) === 1
+        && $last('user_added')['summary'] === 'Added Mel Member (mel@example.test) as a member' && $last('user_added')['actor'] === 'Ada Admin');
+
+    // Settings
+    $s->loadCsrf('/settings.php');
+    [$sport, $smail] = smtp_sink();
+    $n0 = $since();
+    $s->post('/settings.php', ['do' => 'org', 'name' => 'Smoke Org', 'timezone' => 'Australia/Sydney', 'notify_email' => 'alerts@example.test']);
+    $s->post('/settings.php', ['do' => 'org', 'name' => 'Smoke Org', 'timezone' => 'Australia/Sydney', 'notify_email' => 'alerts@example.test']);   // nothing changed: no line
+    $s->post('/settings.php', ['do' => 'routing', 'mode' => 'fixed', 'user_id' => $mel, 'assign_emails' => 'on']);
+    $acct = ['do' => 'email_save', 'acc_name' => 'Smoke SMTP', 'from_email' => 'crm@example.test', 'from_name' => 'Smoke Org', 'smtp_host' => '127.0.0.1', 'smtp_port' => $sport, 'smtp_secure' => 'none', 'smtp_user' => 'crm', 'smtp_pass' => 'sink-secret-pw', 'is_default' => 'on'];
+    $s->post('/settings.php', $acct);
+    $s->post('/settings.php', ['from_email' => 'second@example.test', 'smtp_pass' => ''] + $acct);
+    $acc2 = (int) one($sdir, "SELECT id FROM email_accounts WHERE from_email='second@example.test'");
+    $s->post('/settings.php', ['do' => 'email_default', 'id' => $acc2]);
+    $s->post('/settings.php', ['do' => 'email_del', 'id' => $acc2]);
+    pdo_for($sdir)->exec("UPDATE email_accounts SET is_default=1, smtp_user=''");   // the sink takes no login
+    $s->post('/settings.php', ['do' => 'ai', 'ai_key' => 'sk-ant-smoke-key-1', 'ai_model' => 'claude-haiku-4-5']);
+    $s->post('/settings.php', ['do' => 'ai', 'ai_key' => '********************', 'ai_model' => 'claude-haiku-4-5']);   // saved with the stars still in the field
+    $kept = one($sdir, "SELECT v FROM settings WHERE k='ai_key'");
+    $s->post('/settings.php', ['do' => 'ai', 'ai_key' => 'sk-ant-smoke-key-2', 'ai_model' => 'claude-sonnet-5']);
+    $s->post('/settings.php', ['do' => 'ai', 'ai_key' => '', 'ai_model' => 'claude-sonnet-5', 'ai_key_remove' => 'on']);
+    $s->post('/settings.php', ['do' => 'api_reset']);
+    $stok2 = (string) one($sdir, "SELECT v FROM settings WHERE k='api_token'");
+    $got = $lines($n0);
+    check('settings changes are recorded once each, in plain words', $got === [
+        'Ada Admin | org | Changed the organization timezone, notifications email',
+        'Ada Admin | routing | Lead routing: every new lead goes to Mel Member. Assignment emails on',
+        'Ada Admin | email_account | Added the email account crm@example.test (127.0.0.1:' . $sport . '), password set, default sender',
+        'Ada Admin | email_account | Added the email account second@example.test (127.0.0.1:' . $sport . '), default sender',
+        'Ada Admin | email_account | Made second@example.test the default sender',
+        'Ada Admin | email_account | Removed the email account second@example.test (127.0.0.1)',
+        'Ada Admin | ai_key | AI settings: key set',
+        'Ada Admin | ai_key | AI settings: key replaced, model claude-sonnet-5',
+        'Ada Admin | ai_key | AI settings: key removed',
+        'Ada Admin | api_token | Generated a new API token. The old one stopped working',
+    ], implode("\n", $got));
+    check('saving the AI settings with the stars still in the key field keeps the key', $kept === 'sk-ant-smoke-key-1' && one($sdir, "SELECT v FROM settings WHERE k='ai_key'") === '' && $stok2 !== $stok && $s->api('GET', 'me', $stok)['code'] === 401);
+    $s->post('/settings.php', ['do' => 'routing', 'mode' => 'none', 'assign_emails' => 'on']);
+
+    // Records
+    $mk = fn(string $first, string $email, array $more = []): int => id_from($s->post('/contacts.php', ['do' => 'save', 'id' => 0, 'first_name' => $first, 'email' => $email] + $more), '/contact\.php\?id=(\d+)/');
+    $c1 = $mk('Owen', 'owen@example.test', ['last_name' => 'Owned']); $c2 = $mk('Bella', 'bella@example.test'); $c3 = $mk('Bruno', 'bruno@example.test'); $c4 = $mk('Dee', 'dee@example.test');
+    $co1 = id_from($s->post('/companies.php', ['do' => 'add', 'name' => 'Keep Co']), '/company\.php\?id=(\d+)/');
+    $co2 = id_from($s->post('/companies.php', ['do' => 'add', 'name' => 'Fold Co']), '/company\.php\?id=(\d+)/');
+    $co3 = id_from($s->post('/companies.php', ['do' => 'add', 'name' => 'Gone Co']), '/company\.php\?id=(\d+)/');
+    $s->get('/pipelines.php');
+    $spid = (int) one($sdir, "SELECT id FROM pipelines ORDER BY id LIMIT 1");
+    $s->post('/pipelines.php', ['do' => 'save_deal', 'id' => 0, 'pipeline_id' => $spid, 'name' => 'Log deal', 'value' => '500', 'stage' => 0, 'contact_id' => $c1, 'owner_id' => $sam]);
+    $deal = (int) one($sdir, "SELECT id FROM deals WHERE name='Log deal'");
+    $s->post('/tasks.php', ['do' => 'add', 'title' => 'Log task', 'due_date' => '', 'assigned_to' => $sam]);
+    $task = (int) one($sdir, "SELECT id FROM tasks WHERE title='Log task'");
+    $n0 = $since();
+    $s->post('/contact.php?id=' . $c1, ['do' => 'owner', 'owner_id' => $mel]);
+    $s->post('/contacts.php', ['do' => 'save', 'id' => $c2, 'first_name' => 'Bella', 'email' => 'bella@example.test', 'owner_id' => 0]);
+    $s->post('/company.php?id=' . $co1, ['do' => 'save', 'name' => 'Keep Co', 'website' => '', 'phone' => '', 'industry' => '', 'address' => '', 'notes' => '', 'owner_id' => $mel]);
+    $s->post('/pipelines.php', ['do' => 'save_deal', 'id' => $deal, 'pipeline_id' => $spid, 'name' => 'Log deal', 'value' => '500', 'stage' => 0, 'contact_id' => $c1, 'owner_id' => $mel]);
+    $s->post('/tasks.php', ['do' => 'assign', 'id' => $task, 'assigned_to' => $mel]);
+    $s->post('/contact.php?id=' . $c1, ['do' => 'owner', 'owner_id' => $mel]);   // already theirs: no line
+    $got = $lines($n0);
+    check('every change of owner is recorded with who had it and who has it now', $got === [
+        'Ada Admin | owner_changed | Owner of the contact "Owen Owned" (owen@example.test): Ada Admin -> Mel Member',
+        'Ada Admin | owner_changed | Owner of the contact "Bella" (bella@example.test): Ada Admin -> nobody',
+        'Ada Admin | owner_changed | Owner of the company "Keep Co": Ada Admin -> Mel Member',
+        'Ada Admin | owner_changed | Owner of the deal "Log deal": Ada Admin -> Mel Member',
+        'Ada Admin | owner_changed | Assignee of the task "Log task": Ada Admin -> Mel Member',
+    ], implode("\n", $got));
+    $n0 = $since();
+    $r = $s->api('POST', 'contacts', $stok2, ['email' => 'bella@example.test', 'owner_id' => $mel, 'notify' => false]);
+    $r2 = $s->api('POST', 'deals/' . $deal, $stok2, ['owner_id' => $sam, 'notify' => false]);
+    $got = $after($n0);
+    check('a change made through the API is recorded as the API', $r['code'] === 201 && $r2['code'] === 200 && array_map($line, $got) === [
+        'API | owner_changed | Owner of the contact "Bella" (bella@example.test): nobody -> Mel Member',
+        'API | owner_changed | Owner of the deal "Log deal": Mel Member -> Ada Admin',
+    ] && (int) $got[0]['user_id'] === 0 && $got[0]['entity'] === 'contacts' && (int) $got[0]['entity_id'] === $c2, json_encode($got));
+    $n0 = $since();
+    $s->post('/contacts.php', ['do' => 'bulk', 'bulk' => 'assign', 'owner_id' => $mel, 'ids' => [$c1, $c2, $c3, $c4]]);
+    $s->post('/contacts.php', ['do' => 'bulk', 'bulk' => 'tag', 'newtag' => 'audit, vip', 'ids' => [$c3, $c4]]);
+    $s->post('/contacts.php', ['do' => 'bulk', 'bulk' => 'delete', 'confirm' => 'yes', 'ids' => [$c3, $c4]]);
+    $got = $lines($n0);
+    check('bulk actions are recorded as one action, and a bulk delete names each contact too', $got === [
+        'Ada Admin | bulk_assign | 2 contacts assigned to Mel Member in one go',
+        'Ada Admin | bulk_tag | Tagged 2 contacts "audit", "vip" in one go',
+        'Ada Admin | delete | Deleted the contact "Bruno" (bruno@example.test)',
+        'Ada Admin | delete | Deleted the contact "Dee" (dee@example.test)',
+        'Ada Admin | bulk_delete | Deleted 2 contacts in one go',
+    ], implode("\n", $got));
+    $s->post('/campaigns.php', ['do' => 'save', 'id' => 0, 'name' => 'Draft only', 'subject' => 'Hi', 'body' => '<p>Hello</p>', 'seg_type' => 'all']);
+    $camp = (int) one($sdir, "SELECT id FROM campaigns WHERE name='Draft only'");
+    $s->post('/forms.php', ['do' => 'save', 'id' => 0, 'name' => 'Log form', 'thankyou' => 'Thanks', 'redirect' => '', 'fld_label' => ['Email'], 'fld_name' => ['email'], 'fld_type' => ['email']]);
+    $form = (int) one($sdir, "SELECT id FROM forms WHERE name='Log form'");
+    $wf = make_workflow($s, $sdir, 'Log workflow', 'contact_created', '', [['tag', 'seen']]);
+    $n0 = $since();
+    $s->post('/company.php?id=' . $co2, ['do' => 'merge', 'into' => $co1]);
+    $s->post('/company.php?id=' . $co3, ['do' => 'delete']);
+    $s->post('/pipelines.php', ['do' => 'del_deal', 'id' => $deal]);
+    $s->post('/tasks.php', ['do' => 'del', 'id' => $task]);
+    $s->post('/campaigns.php', ['do' => 'delete', 'id' => $camp]);
+    $s->post('/forms.php', ['do' => 'delete', 'id' => $form]);
+    $s->post('/workflows.php', ['do' => 'delete', 'id' => $wf]);
+    $s->post('/contacts.php', ['do' => 'delete', 'id' => $c2]);
+    $s->post('/contacts.php', ['do' => 'delete', 'id' => 999999]);   // nothing there: no line
+    $got = $lines($n0);
+    check('every delete is recorded with what was deleted, and a merge as a merge', $got === [
+        'Ada Admin | merge | Merged the company "Fold Co" into "Keep Co"',
+        'Ada Admin | delete | Deleted the company "Gone Co"',
+        'Ada Admin | delete | Deleted the deal "Log deal"',
+        'Ada Admin | delete | Deleted the task "Log task"',
+        'Ada Admin | delete | Deleted the campaign "Draft only"',
+        'Ada Admin | delete | Deleted the form "Log form"',
+        'Ada Admin | delete | Deleted the workflow "Log workflow"',
+        'Ada Admin | delete | Deleted the contact "Bella" (bella@example.test)',
+    ], implode("\n", $got));
+    $n0 = $since();
+    $csv = $sdir . DS . 'people.csv';
+    file_put_contents($csv, "first_name,email,owner\nIvy,ivy@example.test,mel@example.test\nIan,ian@example.test,\n");
+    $s->upload('/contacts.php', ['do' => 'import'], 'csv', $csv);
+    $ccsv = $sdir . DS . 'firms.csv';
+    file_put_contents($ccsv, "name,website\nImport Co,import.example\n");
+    $s->upload('/companies.php', ['do' => 'import'], 'csv', $ccsv);
+    $e1 = $s->get('/contacts.php?export=1'); $e2 = $s->get('/companies.php?export=1');
+    $nContacts = (int) one($sdir, "SELECT COUNT(*) FROM contacts"); $nCompanies = (int) one($sdir, "SELECT COUNT(*) FROM companies");
+    $s->post('/campaigns.php', ['do' => 'send', 'id' => 0, 'name' => 'Autumn news', 'subject' => 'News', 'body' => '<p>Hello {{first_name}}</p>', 'seg_type' => 'tag', 'seg_tag' => 'nobody-has-this']);
+    $got = $lines($n0);
+    check('imports, exports and campaign sends are recorded with how many rows they covered', $got === [
+        'Ada Admin | import | Imported 2 rows of contacts from the CSV file "people.csv"',
+        'Ada Admin | import | Imported 1 row of companies from the CSV file "firms.csv"',
+        'Ada Admin | export | Exported ' . $nContacts . ' contacts as CSV',
+        'Ada Admin | export | Exported ' . $nCompanies . ' companies as CSV',
+        'Ada Admin | campaign_sent | Sent the campaign "Autumn news" to 0 recipients tagged "nobody-has-this"',
+    ], implode("\n", $got));
+    check('the exports are clean CSV files, on any PHP version', $e1['code'] === 200 && str_starts_with($e1['body'], "first_name,last_name,email,phone,company,address,tags,source,created,owner\n") && substr_count(trim($e1['body']), "\n") === $nContacts
+        && str_starts_with($e2['body'], "name,website,domain,phone,address,industry,notes,people,created\n") && substr_count(trim($e2['body']), "\n") === $nCompanies
+        && !preg_match('/Deprecated|Warning|Notice/', $e1['body'] . $e2['body']), substr($e1['body'], 0, 160));
+    $all = implode("\n", array_map(fn($r) => implode(' ', $r), pdo_for($sdir)->query("SELECT actor, action, summary, entity, ip FROM audit_log")->fetchAll()));
+    $secrets = array_merge(['smoke-pass-s1', 'smoke-pass-m1', 'smoke-pass-m2', $newPass, 'guess-one', 'guess-two', 'not-my-password', 'sink-secret-pw', 'sk-ant-smoke-key-1', 'sk-ant-smoke-key-2', $stok, $stok2, $key, $key2, $key3, $mkey],
+        $rc, $rc2, $rc3, $rc4, $mrc, array_map(fn($x) => str_replace('-', '', $x), $rc));
+    $leaks = array_values(array_filter($secrets, fn($x) => $x !== '' && stripos($all, $x) !== false));
+    check('no password, code, key or token is ever written to the log', count($secrets) > 70 && !$leaks, implode(', ', $leaks));
+
+    section('Audit log: reading it');
+    $day = fn(int $shift = 0): string => (new DateTime('now', new DateTimeZone('Australia/Sydney')))->modify(($shift < 0 ? '' : '+') . $shift . ' day')->format('Y-m-d');   // a date as the app sees it
+    $r = $s->get('/audit.php');
+    $total = (int) one($sdir, "SELECT COUNT(*) FROM audit_log");
+    check('an admin opens the log from Settings, newest first, 50 lines a page', page_clean($r) && str_contains($s->get('/settings.php')['body'], 'audit.php">Open the audit log</a>') && str_contains($r['body'], number_format($total) . ' lines, page 1 of ' . (int) ceil($total / 50))
+        && substr_count($r['body'], '<tr class="arow">') === 50 && strpos($r['body'], 'Sent the campaign') < strpos($r['body'], 'Imported 2 rows of contacts'), 'lines ' . $total);
+    $mx = new Client($sbase, $sdir . DS . 'jar-mx.txt');
+    $signIn2($mx, 'mel@example.test', 'smoke-pass-m2', $mkey, $mel);
+    $r = $mx->get('/audit.php'); $r2 = $mx->get('/audit.php?export=1');
+    check('a member cannot read or download it', $r['code'] === 403 && $r2['code'] === 403 && !str_contains($r['body'], 'Signed in'));
+    $rows = fn(string $query): int => substr_count($s->get('/audit.php?' . $query)['body'], '<tr class="arow">');
+    check('it filters by what happened: one kind, or a whole group', $rows('kind=merge') === 1 && $rows('kind=bulk_delete') === 1 && $rows('kind=' . rawurlencode('g:Team')) === $logged('user_added') + $logged('user_removed')
+        && $rows('kind=2fa_policy') === 2 && $rows('kind=no-such-kind') === 50);
+    check('by who did it, with failed sign-ins as them, or by nobody signed in', $rows('user=' . $mel . '&kind=login_failed') === $logged('login_failed', 'entity_id=?', [$mel]) && $rows('user=' . $mel . '&kind=2fa_enabled') === 2
+        && $rows('user=other&kind=owner_changed') === 2 && $rows('user=other&kind=password_reset') === 1 && $rows('user=' . $sam . '&kind=password_reset') === 0);
+    check('by words and by date', $rows('q=' . rawurlencode('Log deal')) === 3 && $rows('q=' . rawurlencode('command line')) === 2 && $rows('q=100%25') === 0 && $rows('q=zzzz-nothing') === 0
+        && $rows('from=' . $day() . '&to=' . $day() . '&kind=merge') === 1 && $rows('to=' . $day(-1)) === 0 && $rows('from=' . $day(1)) === 0 && $rows('from=not-a-date&kind=merge') === 1);
+    $r = $s->get('/audit.php?p=2');
+    check('older lines are on the next page', page_clean($r) && str_contains($r['body'], 'page 2 of ') && str_contains($s->get('/audit.php?p=99999')['body'], 'Set-up: the first account'));
+    $n0 = $since();
+    $r = $s->get('/audit.php?export=1&kind=owner_changed');
+    $csvLines = explode("\n", trim($r['body']));
+    check('the lines the filter shows download as CSV, and the download is itself recorded', $r['code'] === 200 && $csvLines[0] === 'time,who,what,details,record,address' && count($csvLines) === 1 + $logged('owner_changed')
+        && str_contains($r['body'], ',API,"Owner changed",') && !preg_match('/Deprecated|Warning|Notice/', $r['body']) && $lines($n0) === ['Ada Admin | export | Exported ' . $logged('owner_changed') . ' audit log lines (filtered)'], $csvLines[0] . ' ' . count($csvLines));
+    $before = (int) one($sdir, "SELECT COUNT(*) FROM audit_log"); $h0 = md5(json_encode(pdo_for($sdir)->query("SELECT * FROM audit_log ORDER BY id")->fetchAll()));
+    foreach ([['do' => 'delete', 'id' => 1], ['do' => 'clear'], ['do' => 'save', 'id' => 1, 'summary' => 'edited'], ['delete' => 'all']] as $try) $s->post('/audit.php', $try);
+    check('the app offers no way to edit or delete a line', (int) one($sdir, "SELECT COUNT(*) FROM audit_log") === $before && md5(json_encode(pdo_for($sdir)->query("SELECT * FROM audit_log ORDER BY id")->fetchAll())) === $h0
+        && !preg_match('/<form method="post"/', $s->get('/audit.php')['body']));
+    $old = time() - 400 * 86400; $edge = time() - 300 * 86400;
+    pdo_for($sdir)->prepare("INSERT INTO audit_log (user_id, actor, action, summary, created_at) VALUES (0, 'Old', 'login', 'thirteen months ago', ?), (0, 'Edge', 'login', 'ten months ago', ?)")->execute([$old, $edge]);
+    pdo_for($sdir)->exec("DELETE FROM settings WHERE k='audit_pruned'");
+    $o = run_php($sdir . DS . 'cron.php');
+    check('the background job drops lines older than 12 months, and only those', str_contains($o, 'workflows_processed=') && $logged('login', "summary='thirteen months ago'") === 0 && $logged('login', "summary='ten months ago'") === 1
+        && (int) one($sdir, "SELECT COUNT(*) FROM audit_log") === $before + 1 && one($sdir, "SELECT v FROM settings WHERE k='audit_pruned'") === $day(), $o);
+    $s->post('/settings.php', ['do' => 'del_user', 'id' => $mel, 'inherit' => 0]);
+    $r = $s->get('/audit.php?user=' . $mel);
+    check('a line still names someone after they have left the team', $last('user_removed')['summary'] === 'Removed Mel Member (mel@example.test, member). What they owned (3 contacts, 1 company) was left unassigned'
+        && str_contains($s->get('/audit.php?q=' . rawurlencode('Mel Member'))['body'], '>Mel Member</td>') && $logged('delete', "entity='users'") === 0, $last('user_removed')['summary'] ?? '');
+    foreach (['index.php', 'settings.php', 'twofa.php', 'audit.php', 'audit.php?kind=g%3ASecurity&q=two', 'contacts.php', 'tasks.php', 'pipelines.php'] as $p) {
+        check("page loads without warnings: $p", page_clean($s->get('/' . $p)));
+    }
+    $h4 = schema_hash($sdir);
+    file_put_contents($sdir . DS . 'again.php', "<?php require __DIR__ . '/_boot.php'; db(); echo 'ok';");
+    check('opening the database again changes nothing', run_php($sdir . DS . 'again.php') === 'ok' && schema_hash($sdir) === $h4);
+    stop($ssrv);
+
     /* ================================================== B. upgrade from 1.0 === */
     section('Upgrade from v1.0');
     $git = trim((string) @shell_exec('git -C ' . escapeshellarg($ROOT) . ' rev-list --max-parents=0 HEAD 2>&1'));
@@ -1194,7 +1728,7 @@ try {
         $n->loadCsrf('/index.php?login=1');
         $r = $n->post('/index.php?login=1', ['email' => 'old@example.test', 'password' => 'smoke-pass-2']);
         check('existing login still works after the upgrade', $r['code'] === 302, 'HTTP ' . $r['code']);
-        check('database upgraded itself to schema version 3', one($new, "SELECT v FROM settings WHERE k='schema_version'") === '3');
+        check('database upgraded itself to schema version 4', one($new, "SELECT v FROM settings WHERE k='schema_version'") === '4');
         $names = pdo_for($new)->query("SELECT name FROM companies ORDER BY id")->fetchAll(PDO::FETCH_COLUMN);
         check('company names on contacts became company records, merged case-insensitively', $names === ['Acme', 'Beta Co'], implode(' | ', $names));
         $acmeId = (int) one($new, "SELECT id FROM companies WHERE name='Acme'");
@@ -1265,7 +1799,7 @@ try {
         $n = new Client($base, $new . DS . 'jar.txt');
         $r = sign_in($n, 'old@example.test', 'smoke-pass-2');
         check('existing login still works after the upgrade from 1.1', $r['code'] === 302, 'HTTP ' . $r['code']);
-        check('the 1.1 database upgraded itself to schema version 3', one($new, "SELECT v FROM settings WHERE k='schema_version'") === '3');
+        check('the 1.1 database upgraded itself to schema version 4', one($new, "SELECT v FROM settings WHERE k='schema_version'") === '4');
         $owner = fn(string $tbl, string $col, string $where): int => (int) one($new, "SELECT $col FROM $tbl WHERE $where");
         check('what a removed member left behind becomes unassigned', $owner('contacts', 'owner_id', "id=$bea") === 0 && $owner('companies', 'owner_id', "id=$own") === 0
             && $owner('deals', 'owner_id', "id=$boDeal") === 0 && $owner('tasks', 'assigned_to', "title='Bo task'") === 0);
@@ -1286,6 +1820,70 @@ try {
         foreach (['index.php', 'contacts.php?who=all', 'contact.php?id=' . $bea, 'companies.php', 'pipelines.php', 'tasks.php', 'reports.php', 'settings.php'] as $p) {
             $r = $n->get('/' . $p);
             check("page upgraded from 1.1 loads without warnings: $p", $r['code'] === 200 && !preg_match('/(Warning|Notice|Deprecated|Fatal error)<\/b>:|Uncaught /', $r['body']), 'HTTP ' . $r['code']);
+        }
+        $h2 = schema_hash($new);
+        $n->get('/index.php');
+        check('a second visit changes nothing more', schema_hash($new) === $h2);
+        stop($srv);
+    }
+
+    /* ================================================== H. upgrade from 1.2 === */
+    section('Upgrade from v1.2');
+    $v12 = trim((string) @shell_exec('git -C ' . escapeshellarg($ROOT) . ' rev-list -n 1 v1.2.1 2>&1'));
+    if (!preg_match('/^[0-9a-f]{40}$/', $v12)) {
+        echo "  skip  no v1.2.1 tag in the git history here, so the v1.2 upgrade test cannot run\n";
+    } else {
+        $old = tmpdir('v12');
+        export_release($ROOT, $v12, $old);
+        [$base, $srv] = serve($old);
+        $o = new Client($base, $old . DS . 'jar.txt');
+        setup_admin($o, 'old@example.test', 'smoke-pass-2');
+        $o->loadCsrf('/settings.php');
+        $o->post('/settings.php', ['do' => 'add_user', 'uname' => 'Mo Member', 'email' => 'mo@example.test', 'upass' => 'smoke-pass-b', 'role' => 'member']);
+        $adm = (int) one($old, "SELECT id FROM users WHERE email='old@example.test'"); $mo = (int) one($old, "SELECT id FROM users WHERE email='mo@example.test'");
+        $kit = id_from($o->post('/contacts.php', ['do' => 'save', 'id' => 0, 'first_name' => 'Kit', 'email' => 'kit@example.test', 'tags' => 'lead', 'owner_id' => $mo]), '/contact\.php\?id=(\d+)/');
+        $o->post('/companies.php', ['do' => 'add', 'name' => 'Old Co']);
+        $o->get('/pipelines.php');
+        $opid = (int) one($old, "SELECT id FROM pipelines ORDER BY id LIMIT 1");
+        $o->post('/pipelines.php', ['do' => 'save_deal', 'id' => 0, 'pipeline_id' => $opid, 'name' => 'Old deal', 'value' => '250', 'stage' => 1, 'contact_id' => $kit, 'owner_id' => $mo]);
+        $o->post('/tasks.php', ['do' => 'add', 'title' => 'Old task', 'due_date' => '', 'assigned_to' => $mo]);
+        $o->post('/settings.php', ['do' => 'routing', 'mode' => 'fixed', 'user_id' => $mo, 'assign_emails' => 'on']);
+        $o->get('/settings.php');
+        $otok = (string) one($old, "SELECT v FROM settings WHERE k='api_token'");
+        $v12api = [];
+        foreach (['me', 'contacts', 'contacts/' . $kit, 'companies', 'deals?status=all', 'pipelines', 'users'] as $call) $v12api[$call] = $o->api('GET', $call, $otok)['json'];
+        $people = fn(string $dir): array => pdo_for($dir)->query("SELECT id, email, pass_hash, name, role, status, created_at FROM users ORDER BY id")->fetchAll();
+        $peopleBefore = $people($old); $ruleBefore = one($old, "SELECT v FROM settings WHERE k='lead_routing'");
+        check('v1.2 database was built with the 1.2.1 release', one($old, "SELECT v FROM settings WHERE k='schema_version'") === '3' && ($v12api['me']['version'] ?? '') === '1.2.1' && $kit > 0 && count($peopleBefore) === 2
+            && (int) one($old, "SELECT COUNT(*) FROM sqlite_master WHERE name='audit_log'") === 0);
+        stop($srv);
+
+        $new = tmpdir('upgraded12');
+        copy_app($ROOT, $new);
+        rcopy($old . DS . 'data', $new . DS . 'data');
+        [$base, $srv] = serve($new);
+        $n = new Client($base, $old . DS . 'jar.txt');   // the same browser, with its cookie from before the upgrade
+        $r = $n->get('/index.php');
+        check('someone signed in before the upgrade is still signed in after it', $r['code'] === 200 && str_contains($r['body'], 'Good day'), 'HTTP ' . $r['code']);
+        check('the 1.2 database upgraded itself to schema version 4', one($new, "SELECT v FROM settings WHERE k='schema_version'") === '4');
+        $cols = array_column(pdo_for($new)->query("PRAGMA table_info(users)")->fetchAll(), 'name');
+        check('each account gains what two-factor sign-in needs, switched off', !array_diff(['totp_secret', 'totp_enabled', 'totp_last_step', 'recovery_codes', 'session_version'], $cols)
+            && (int) one($new, "SELECT COUNT(*) FROM users WHERE totp_enabled!=0 OR totp_secret!='' OR totp_last_step!=0 OR session_version!=0 OR recovery_codes!='[]'") === 0);
+        check('nothing else about the accounts changed', $people($new) === $peopleBefore);
+        check('the audit log starts empty: nothing is made up about the past', (int) one($new, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='audit_log'") === 1 && (int) one($new, "SELECT COUNT(*) FROM audit_log") === 0);
+        $q = new Client($base, $new . DS . 'jar-mo.txt');
+        $r = sign_in($q, 'mo@example.test', 'smoke-pass-b');
+        check('existing passwords sign in as before, with no second step, and that is the first line in the log', $r['code'] === 302 && $q->get('/contacts.php')['code'] === 200
+            && pdo_for($new)->query("SELECT action, actor, summary FROM audit_log ORDER BY id")->fetchAll() === [['action' => 'login', 'actor' => 'Mo Member', 'summary' => 'Signed in']]);
+        $changed = [];
+        foreach ($v12api as $call => $before) $changed = array_merge($changed, api_diff($before, $n->api('GET', $call, $otok)['json'], $call));
+        check('every v1.2 API call answers with the same fields and values, apart from the version', count($v12api) === 7 && $changed === ['me.version: "1.2.1" -> "' . $version . '"'], implode(' | ', $changed));
+        check('owners, tags and the lead routing rule are untouched', (int) one($new, "SELECT owner_id FROM contacts WHERE id=?", [$kit]) === $mo && tags_of($new, 'kit@example.test') === ['lead']
+            && (int) one($new, "SELECT owner_id FROM deals WHERE name='Old deal'") === $mo && (int) one($new, "SELECT assigned_to FROM tasks WHERE title='Old task'") === $mo
+            && one($new, "SELECT v FROM settings WHERE k='lead_routing'") === $ruleBefore);
+        $n->loadCsrf('/settings.php');
+        foreach (['index.php', 'contacts.php', 'contact.php?id=' . $kit, 'companies.php', 'pipelines.php', 'tasks.php', 'reports.php', 'settings.php', 'twofa.php', 'audit.php'] as $p) {
+            check("page upgraded from 1.2 loads without warnings: $p", page_clean($n->get('/' . $p)));
         }
         $h2 = schema_hash($new);
         $n->get('/index.php');
